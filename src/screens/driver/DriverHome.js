@@ -4,17 +4,21 @@ import {
   Alert, ActivityIndicator, Switch, ScrollView, TextInput, Linking, Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import {
   collection, query, where, onSnapshot,
-  doc, updateDoc, getDoc, serverTimestamp, arrayUnion,
+  doc, updateDoc, getDoc, serverTimestamp, arrayUnion, getDocs, limit, addDoc,
 } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
 
 const VLABELS = {
-  bike: '🏍️ Bike', '3wheeler': '🛺 3 Wheeler',
-  chota_hatti: '🚛 Chota Hatti', tempo: '🚚 Tempo',
+  bike: '🏍️ Bike', 
+  '3wheeler': '🛺 3 Wheeler Rickshaw',
+  '3wheeler_transport': '🛺 3 Wheeler Transport',
+  chota_hatti: '🚛 Chota Hatti', 
+  tempo: '🚚 Tempo',
 };
 
 // Get vehicle label from settings or fallback to VLABELS
@@ -52,6 +56,7 @@ function OnlinePulse() {
 }
 
 export default function DriverHome() {
+  const navigation = useNavigation();
   const { user, driverDoc } = useAuth();
   const { settings } = useAppSettings(); // ← Get settings from Firestore
   const [isOnline, setIsOnline] = useState(false);
@@ -61,6 +66,7 @@ export default function DriverHome() {
   const [otpError, setOtpError] = useState('');
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+  const [timeLeftForCancel, setTimeLeftForCancel] = useState(600); // Track time left for current booking
   const prevStatusRef = useRef(null);
 
   const kycStatus = driverDoc?.kyc?.status || 'not_started';
@@ -91,6 +97,21 @@ export default function DriverHome() {
     }
   }, [currentBooking?.status]);
 
+  // Timer for cancel button - updates every second
+  useEffect(() => {
+    if (!currentBooking?.createdAt) return;
+
+    const timer = setInterval(() => {
+      const createdTime = currentBooking.createdAt.toMillis?.() || new Date(currentBooking.createdAt).getTime();
+      const now = Date.now();
+      const diffSeconds = Math.floor((now - createdTime) / 1000);
+      const secondsLeft = Math.max(0, 180 - diffSeconds); // 180 seconds = 3 minutes
+      setTimeLeftForCancel(secondsLeft);
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [currentBooking?.id, currentBooking?.createdAt]);
+
   // Firestore listeners — only depends on user.uid, NOT on driverDoc/vehicle
   useEffect(() => {
     if (!user?.uid) { setLoading(false); return; }
@@ -100,14 +121,27 @@ export default function DriverHome() {
       if (snap.exists()) setIsOnline(snap.data().status === 'online');
     });
 
-    // 2. ALL searching bookings — filter client-side so we don't miss existing ones
+    // 2. Searching bookings — Real-time listener (instead of polling every 30 secs)
     const unsubSearching = onSnapshot(
-      query(collection(db, 'bookings'), where('status', '==', 'searching')),
+      query(
+        collection(db, 'bookings'),
+        where('status', '==', 'searching'),
+        limit(50)
+      ),
       (snap) => {
-        setAllSearching(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        data.sort((a, b) => {
+          const timeA = a.createdAt?.toMillis?.() || new Date(a.createdAt).getTime() || 0;
+          const timeB = b.createdAt?.toMillis?.() || new Date(b.createdAt).getTime() || 0;
+          return timeB - timeA; // Descending (newest first)
+        });
+        setAllSearching(data);
         setLoading(false);
       },
-      (err) => { console.error('Searching error:', err); setLoading(false); }
+      (err) => {
+        console.error('Searching error:', err);
+        setLoading(false);
+      }
     );
 
     // 3. Bookings assigned to ME
@@ -119,7 +153,11 @@ export default function DriverHome() {
       (err) => { console.error('My bookings error:', err); }
     );
 
-    return () => { unsubDriver(); unsubSearching(); unsubMine(); };
+    return () => { 
+      unsubDriver();
+      unsubSearching();
+      unsubMine();
+    };
   }, [user?.uid]);
 
   // ---- ACTIONS ----
@@ -215,7 +253,8 @@ export default function DriverHome() {
           deliveryVerifiedAt: serverTimestamp(),
           completedAt: serverTimestamp(),
         });
-        const earning = Math.round((currentBooking.fare?.totalInPaise || 0) * 0.8);
+        const commissionPct = currentBooking.commission?.pct || 20;
+        const earning = Math.round((currentBooking.fare?.totalInPaise || 0) * ((100 - commissionPct) / 100));
         const driverRef = doc(db, 'drivers', user.uid);
         const driverSnap = await getDoc(driverRef);
         const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
@@ -230,6 +269,59 @@ export default function DriverHome() {
       }
     } catch (e) { Alert.alert('Error', e.message); }
     setActionLoading(false);
+  };
+
+  // Helper to check if 10 minutes have passed since booking creation
+  const canCancelBooking = (booking) => {
+    if (!booking.createdAt) return false;
+    const createdTime = booking.createdAt.toMillis?.() || new Date(booking.createdAt).getTime();
+    const now = Date.now();
+    const diffMinutes = (now - createdTime) / (1000 * 60);
+    return diffMinutes >= 10;
+  };
+
+  const handleCancelBooking = async (booking) => {
+    Alert.alert(
+      '❌ Cancel Booking?',
+      'Are you sure you want to cancel this booking? The customer will be notified.',
+      [
+        { text: 'No, Keep It', style: 'cancel' },
+        {
+          text: 'Yes, Cancel',
+          style: 'destructive',
+          onPress: async () => {
+            setActionLoading(true);
+            try {
+              // Update booking status
+              await updateDoc(doc(db, 'bookings', booking.id), {
+                status: 'cancelled',
+                cancelledBy: 'driver',
+                cancelledAt: serverTimestamp(),
+              });
+
+              // Notify customer
+              if (booking.customerId) {
+                await addDoc(collection(db, 'notifications'), {
+                  recipientId: booking.customerId,
+                  type: 'booking_cancelled',
+                  title: '❌ Booking Cancelled',
+                  message: `Driver cancelled the ${booking.service === 'ride' ? 'ride' : 'delivery'}.`,
+                  bookingId: booking.id,
+                  cancelledBy: 'driver',
+                  isRead: false,
+                  createdAt: serverTimestamp(),
+                });
+              }
+
+              Alert.alert('✅ Booking Cancelled', 'The customer has been notified.');
+            } catch (error) {
+              Alert.alert('❌ Error', error.message);
+            }
+            setActionLoading(false);
+          },
+        },
+      ]
+    );
   };
 
   const fmt = (p) => '₹' + Math.round((p || 0) / 100);
@@ -262,9 +354,12 @@ export default function DriverHome() {
                 ? driverDoc?.kyc?.rejectionReason || 'Please resubmit your KYC.'
                 : 'Complete your KYC to start accepting bookings.'}
             </Text>
-            <View style={s.kycAction}>
-              <Text style={s.kycActionText}>👉 Go to the "KYC" tab</Text>
-            </View>
+            <TouchableOpacity 
+              style={s.kycActionBtn} 
+              onPress={() => navigation.navigate('DriverProfile')}
+            >
+              <Text style={s.kycActionText}>👉 Go to KYC Tab</Text>
+            </TouchableOpacity>
           </View>
         </ScrollView>
       </SafeAreaView>
@@ -391,6 +486,34 @@ export default function DriverHome() {
               </TouchableOpacity>
             </View>
           )}
+
+          {/* Cancel Button - Shows with timer */}
+          {(() => {
+            const isEnabled = timeLeftForCancel === 0;
+            const minutes = Math.floor(timeLeftForCancel / 60);
+            const seconds = timeLeftForCancel % 60;
+            
+            return (
+              <TouchableOpacity
+                style={[
+                  s.cancelBtn,
+                  !isEnabled && s.cancelBtnDisabled
+                ]}
+                onPress={() => handleCancelBooking(currentBooking)}
+                disabled={!isEnabled}
+              >
+                <Text style={[
+                  s.cancelBtnText,
+                  !isEnabled && s.cancelBtnDisabledText
+                ]}>
+                  {isEnabled 
+                    ? '❌ Cancel Booking' 
+                    : `⏳ Cancel in ${minutes}:${seconds.toString().padStart(2, '0')}`
+                  }
+                </Text>
+              </TouchableOpacity>
+            );
+          })()}
         </ScrollView>
       </SafeAreaView>
     );
@@ -406,7 +529,7 @@ export default function DriverHome() {
             {isOnline ? <OnlinePulse /> : <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#EF4444', marginRight: 6 }} />}
             <Text style={s.headerSub}>
               {isOnline ? 'Online' : 'Offline'}
-              {myVehicle ? ` • ${VLABELS[myVehicle]}` : ''}
+              {myVehicle ? ` • ${getVehicleLabel(myVehicle, [...(settings.parcelVehicles || []), ...(settings.rideVehicles || [])])}` : ''}
             </Text>
           </View>
         </View>
@@ -427,7 +550,7 @@ export default function DriverHome() {
           <Text style={{ fontSize: 56 }}>📭</Text>
           <Text style={s.emptyTitle}>No Bookings</Text>
           <Text style={s.emptySub}>
-            Waiting for {myVehicle ? VLABELS[myVehicle] : ''} requests...
+            Waiting for {myVehicle ? getVehicleLabel(myVehicle, [...(settings.parcelVehicles || []), ...(settings.rideVehicles || [])]) : 'available'} requests...
           </Text>
           {/* FIX: Show if there ARE searching bookings but none match vehicle */}
           {allSearching.length > 0 && !myVehicle && (
@@ -516,7 +639,8 @@ const s = StyleSheet.create({
   kycBlockTitle: { fontSize: 20, fontWeight: '700', color: '#1F2937', marginTop: 12, textAlign: 'center' },
   kycBlockDesc: { fontSize: 14, color: '#6B7280', marginTop: 8, textAlign: 'center', lineHeight: 20 },
   kycAction: { backgroundColor: '#10B98115', padding: 14, borderRadius: 10, marginTop: 20, width: '100%' },
-  kycActionText: { fontSize: 14, fontWeight: '600', color: '#10B981', textAlign: 'center' },
+  kycActionBtn: { backgroundColor: '#10B981', paddingVertical: 14, paddingHorizontal: 20, borderRadius: 12, marginTop: 20, width: '100%', alignItems: 'center', shadowColor: '#10B981', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  kycActionText: { fontSize: 15, fontWeight: '700', color: '#fff', textAlign: 'center' },
   // Payment
   codAlert: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 10, padding: 12, marginTop: 10 },
   codAlertTitle: { fontSize: 13, fontWeight: '800', color: '#92400E' },
@@ -543,4 +667,8 @@ const s = StyleSheet.create({
   btnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   callBtn: { backgroundColor: '#10B981', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 14, marginTop: 8, alignSelf: 'flex-start' },
   callBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  cancelBtn: { marginTop: 16, paddingVertical: 12, paddingHorizontal: 16, backgroundColor: '#FEE2E2', borderRadius: 8, borderWidth: 1.5, borderColor: '#EF4444' },
+  cancelBtnText: { fontSize: 14, fontWeight: '700', color: '#EF4444', textAlign: 'center' },
+  cancelBtnDisabled: { backgroundColor: '#F3F4F6', borderColor: '#D1D5DB', opacity: 0.6 },
+  cancelBtnDisabledText: { color: '#9CA3AF' },
 });

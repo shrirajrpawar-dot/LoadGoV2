@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -21,7 +21,12 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.shrirajrpawar.LoadGoV2"
+      "package": "com.shrirajrpawar.LoadGoV2",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDqEdCuxppmgcSK0i9SbEWjw9tnsn9YnCI"
+        }
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"

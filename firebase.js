@@ -2,6 +2,7 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { initializeAuth, getReactNativePersistence, getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
+import { getFunctions } from 'firebase/functions';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const firebaseConfig = {
@@ -24,7 +25,10 @@ try {
   auth = getAuth(app);
 }
 
+export const GOOGLE_MAPS_API_KEY = "AIzaSyDqEdCuxppmgcSK0i9SbEWjw9tnsn9YnCI";
+
 export { auth };
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+export const functions = getFunctions(app, 'asia-south1');
 export default app;

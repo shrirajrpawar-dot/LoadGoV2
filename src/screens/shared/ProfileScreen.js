@@ -36,7 +36,8 @@ export default function ProfileScreen() {
 
   useEffect(() => {
     if (!user?.uid) return;
-    setIsDriver(driverDoc?.kyc?.fullName ? true : false);
+    // Check if driver document exists OR if profile mode is driver
+    setIsDriver(!!driverDoc || profile?.mode === 'driver');
     
     const unsub = onSnapshot(doc(db, 'drivers', user.uid), (snap) => {
       if (snap.exists()) {
@@ -53,7 +54,7 @@ export default function ProfileScreen() {
       }
     });
     return () => unsub();
-  }, [user?.uid, driverDoc?.kyc?.fullName]);
+  }, [user?.uid, driverDoc, profile?.mode]);
 
   // Animation for "Under Review" pulse effect
   useEffect(() => {
@@ -161,6 +162,14 @@ export default function ProfileScreen() {
       }
 
       setUploadProgress('Saving KYC...');
+      
+      // Get vehicle label from either parcel or ride vehicles
+      const allVehicles = [
+        ...(settings.parcelVehicles || []),
+        ...(settings.rideVehicles || [])
+      ];
+      const vehicleLabel = allVehicles.find(v => v.id === vehicleType)?.label || vehicleType;
+      
       await updateDoc(doc(db, 'drivers', user.uid), {
         'kyc.fullName': fullName,
         'kyc.aadharNumber': aadharNum,
@@ -171,7 +180,7 @@ export default function ProfileScreen() {
         'kyc.status': 'pending',
         'kyc.submittedAt': serverTimestamp(),
         'vehicle.type': vehicleType,
-        'vehicle.label': settings.vehicles.find(v => v.id === vehicleType)?.label || vehicleType,
+        'vehicle.label': vehicleLabel,
         'vehicle.model': vehicleModel,
         'vehicle.number': vehicleNumber,
       });
@@ -199,15 +208,29 @@ export default function ProfileScreen() {
     ]);
   };
 
-  const handleJoinAsDriver = async () => {
-    try {
-      await joinAsDriver();
-      setIsDriver(true);
-      Alert.alert('✅', 'Complete your KYC to go online');
-      setActiveTab('kyc');
-    } catch (e) {
-      Alert.alert('Error', e.message);
-    }
+  const handleJoinAsDriver = () => {
+    Alert.alert(
+      '⚠️ Switch to Driver Mode',
+      'You will switch to driver mode and won\'t be able to use the customer profile anymore.\n\nYou can only accept deliveries and manage earnings.\n\nAre you sure?',
+      [
+        { text: 'Cancel', onPress: () => {}, style: 'cancel' },
+        {
+          text: 'Yes, Join as Driver',
+          onPress: async () => {
+            try {
+              await joinAsDriver();
+              // isDriver will sync automatically from auth context
+              Alert.alert('✅ Welcome!', 'Complete your KYC to start accepting bookings');
+              // Give time for state to update before switching tab
+              setTimeout(() => setActiveTab('kyc'), 500);
+            } catch (e) {
+              Alert.alert('Error', e.message);
+            }
+          },
+          style: 'destructive'
+        }
+      ]
+    );
   };
 
   const kycStatus = driverDoc?.kyc?.status || 'not_started';
@@ -243,33 +266,42 @@ export default function ProfileScreen() {
               </View>
             )}
 
-            {/* Action Buttons */}
-            <View style={st.buttonGroup}>
-              {!isDriver ? (
+            {/* Action Buttons - CUSTOMER ONLY */}
+            {!isDriver && (
+              <View style={st.buttonGroup}>
                 <TouchableOpacity style={st.btn} onPress={handleJoinAsDriver}>
                   <Text style={st.btnText}>🚗 Join as Driver</Text>
                 </TouchableOpacity>
-              ) : (
+                <TouchableOpacity style={[st.btn, { backgroundColor: '#EF4444' }]} onPress={handleSignOut}>
+                  <Text style={st.btnText}>🚪 Sign Out</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Action Buttons - DRIVER ONLY */}
+            {isDriver && (
+              <View style={st.buttonGroup}>
                 <TouchableOpacity style={[st.btn, { backgroundColor: '#F59E0B' }]} onPress={() => setActiveTab('kyc')}>
                   <Text style={st.btnText}>📋 Update KYC</Text>
                 </TouchableOpacity>
-              )}
-              <TouchableOpacity style={[st.btn, { backgroundColor: '#EF4444' }]} onPress={handleSignOut}>
-                <Text style={st.btnText}>🚪 Sign Out</Text>
-              </TouchableOpacity>
-            </View>
+                <TouchableOpacity style={[st.btn, { backgroundColor: '#EF4444' }]} onPress={handleSignOut}>
+                  <Text style={st.btnText}>🚪 Sign Out</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         )}
 
-        {/* KYC TAB (inside Profile) */}
-        {activeTab === 'kyc' && (
+        {/* KYC TAB - DRIVER ONLY */}
+        {activeTab === 'kyc' && isDriver && (
           <View>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 20 }}>
-              <TouchableOpacity onPress={() => setActiveTab('profile')}>
-                <Text style={{ fontSize: 18, color: '#10B981' }}>← Back</Text>
-              </TouchableOpacity>
-              <Text style={st.title}>📋 KYC Verification</Text>
-            </View>
+            <TouchableOpacity 
+              onPress={() => setActiveTab('profile')}
+              style={{ marginBottom: 16, paddingVertical: 8 }}
+            >
+              <Text style={{ fontSize: 14, color: '#10B981', fontWeight: '600' }}>← Go to Profile Tab</Text>
+            </TouchableOpacity>
+            <Text style={st.title}>📋 KYC Verification</Text>
 
             {/* KYC Status Banner */}
             {isApproved && (
@@ -316,16 +348,23 @@ export default function ProfileScreen() {
               <Text style={st.sectionTitle}>🚗 Vehicle Details</Text>
               <Text style={st.label}>Vehicle Type *</Text>
               <View style={st.vehicleGrid}>
-                {settings.vehicles.map((v) => (
-                  <TouchableOpacity
-                    key={v.id}
-                    style={[st.vehicleBtn, vehicleType === v.id && st.vehicleBtnActive]}
-                    onPress={() => setVehicleType(v.id)}
-                    disabled={isApproved && !isEditingKyc}
-                  >
-                    <Text style={st.vehicleLabel}>{v.label}</Text>
-                  </TouchableOpacity>
-                ))}
+                {(() => {
+                  // Get all unique vehicles from both parcel and ride (for driver to choose)
+                  const allVehicles = [
+                    ...settings.parcelVehicles,
+                    ...settings.rideVehicles.filter(rv => !settings.parcelVehicles.find(pv => pv.id === rv.id))
+                  ];
+                  return allVehicles.map((v) => (
+                    <TouchableOpacity
+                      key={v.id}
+                      style={[st.vehicleBtn, vehicleType === v.id && st.vehicleBtnActive]}
+                      onPress={() => setVehicleType(v.id)}
+                      disabled={isApproved && !isEditingKyc}
+                    >
+                      <Text style={st.vehicleLabel}>{v.label}</Text>
+                    </TouchableOpacity>
+                  ));
+                })()}
               </View>
               <Input label="Vehicle Model *" value={vehicleModel} onChangeText={setVehicleModel} editable={!isApproved || isEditingKyc} />
               <Input label="Vehicle Number *" value={vehicleNumber} onChangeText={setVehicleNumber} editable={!isApproved || isEditingKyc} />

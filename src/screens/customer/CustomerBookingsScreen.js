@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, ActivityIndicator, Alert,
-  TouchableOpacity, Linking, SectionList,
+  TouchableOpacity, Linking, SectionList, Share, Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
@@ -23,6 +23,60 @@ function isBookingExpired(booking) {
   const nowTime = Date.now();
   const minutes = (nowTime - createdTime) / (1000 * 60);
   return minutes > 15;
+}
+
+// 📋 Share Receipt Function
+async function shareReceipt(booking) {
+  try {
+    const totalFare = (booking.fare?.totalInPaise || 0) / 100;
+    const completedDate = booking.completedAt?.toDate?.()?.toLocaleString() || 
+                          booking.createdAt?.toDate?.()?.toLocaleString() || 
+                          new Date().toLocaleString();
+    
+    const receipt = `
+📦 LOADGO RECEIPT
+═══════════════════════════════════════
+Booking ID: ${booking.id.substring(0, 12)}...
+Status: ✅ Delivered
+
+DETAILS
+─────────────────────────────────────
+Vehicle: ${booking.vehicleLabel || booking.vehicleType}
+Customer: ${booking.customerName || 'N/A'}
+Distance: ${booking.distanceKm} km
+
+ROUTE
+─────────────────────────────────────
+📍 From: ${booking.pickup?.address || 'N/A'}
+📌 To: ${booking.drop?.address || 'N/A'}
+
+${booking.driverName ? `DRIVER
+─────────────────────────────────────
+🚗 ${booking.driverName}
+📞 ${booking.driverPhone || 'N/A'}
+` : ''}
+FARE BREAKDOWN
+─────────────────────────────────────
+Base Fare: ₹${booking.fare?.baseFare || 0}
+Distance Fare: ₹${booking.fare?.distanceFare || 0}
+─────────────────────────────────────
+Total Amount: ₹${totalFare.toFixed(2)}
+Payment: ${booking.paymentMethod === 'upi' ? '💳 UPI (Online)' : '💵 Cash on Delivery'}
+
+═══════════════════════════════════════
+Completed: ${completedDate}
+
+Thank you for choosing LoadGo! 🙏
+Track your deliveries at loadgo.app
+    `.trim();
+
+    await Share.share({
+      message: receipt,
+      title: `LoadGo Receipt - ${booking.id.substring(0, 8)}`,
+    });
+  } catch (error) {
+    Alert.alert('Error', 'Could not share receipt: ' + error.message);
+  }
 }
 
 export default function CustomerBookingsScreen() {
@@ -210,9 +264,19 @@ function BookingCard({ booking }) {
 
       {/* Completed */}
       {booking.status === 'completed' && (
-        <View style={styles.completedBox}>
-          <Text style={styles.completedText}>✅ Successfully Delivered</Text>
-        </View>
+        <>
+          <View style={styles.completedBox}>
+            <Text style={styles.completedText}>✅ Successfully Delivered</Text>
+          </View>
+          
+          {/* Share Receipt Button - Only for completed bookings */}
+          <TouchableOpacity
+            style={styles.shareReceiptBtn}
+            onPress={() => shareReceipt(booking)}
+          >
+            <Text style={styles.shareReceiptText}>📋 Share Receipt</Text>
+          </TouchableOpacity>
+        </>
       )}
     </View>
   );
@@ -271,4 +335,15 @@ const styles = StyleSheet.create({
     borderRadius: 8, alignItems: 'center',
   },
   completedText: { fontSize: 14, fontWeight: '700', color: '#10B981' },
+  shareReceiptBtn: { 
+    marginTop: 10, 
+    paddingVertical: 12, 
+    paddingHorizontal: 16, 
+    backgroundColor: '#EFF6FF', 
+    borderRadius: 8, 
+    borderWidth: 1.5, 
+    borderColor: '#3B82F6',
+    alignItems: 'center',
+  },
+  shareReceiptText: { fontSize: 14, fontWeight: '700', color: '#3B82F6' },
 });

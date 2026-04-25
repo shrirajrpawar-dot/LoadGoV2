@@ -102,24 +102,46 @@ export default function DriverEarnings() {
         {completedBookings.length > 0 && (
           <View style={s.historySection}>
             <Text style={s.historyTitle}>Recent Deliveries ({completedBookings.length})</Text>
-            {completedBookings.slice(0, 10).map((b) => (
-              <View key={b.id} style={s.historyCard}>
-                <View style={s.historyRow}>
-                  <Text style={s.historyVehicle}>{b.vehicleLabel || b.vehicleType}</Text>
-                  <Text style={s.historyEarning}>
-                    +₹{Math.round(((b.fare?.totalInPaise || 0) * 0.8) / 100)}
-                  </Text>
+            {completedBookings.slice(0, 10).map((b) => {
+              const totalFare = (b.fare?.totalInPaise || 0) / 100;
+              const commissionPct = b.commission?.pct || 20;
+              const commissionAmt = (b.commission?.amountInPaise || 0) / 100;
+              const earning = totalFare - commissionAmt;
+              
+              return (
+                <View key={b.id} style={s.historyCard}>
+                  <View style={s.historyRow}>
+                    <Text style={s.historyVehicle}>{b.vehicleLabel || b.vehicleType}</Text>
+                    <Text style={s.historyEarning}>+₹{earning.toFixed(0)}</Text>
+                  </View>
+                  <Text style={s.historyAddr} numberOfLines={1}>📍 {b.pickup?.address}</Text>
+                  
+                  {/* NEW: Fare Breakdown */}
+                  <View style={s.fareBreakdown}>
+                    <View style={s.fareRow}>
+                      <Text style={s.fareLabel}>Total Fare:</Text>
+                      <Text style={s.fareValue}>₹{totalFare.toFixed(0)}</Text>
+                    </View>
+                    <View style={s.fareRow}>
+                      <Text style={s.fareLabelRed}>Commission ({commissionPct}%):</Text>
+                      <Text style={s.fareValueRed}>-₹{commissionAmt.toFixed(0)}</Text>
+                    </View>
+                    <View style={[s.fareRow, s.fareRowTotal]}>
+                      <Text style={s.fareLabelTotal}>Your Earning:</Text>
+                      <Text style={s.fareValueTotal}>₹{earning.toFixed(0)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={[s.historyPayTag, b.paymentMethod === 'cod' ? s.historyTagCod : s.historyTagUpi]}>
+                    <Text style={s.historyPayText}>
+                      {b.paymentMethod === 'cod' ? '💵 COD' : '💳 UPI'}
+                      {b.paymentMethod === 'cod' && b.commission?.status === 'pending_from_driver'
+                        ? ' — Commission Pending' : ''}
+                    </Text>
+                  </View>
                 </View>
-                <Text style={s.historyAddr} numberOfLines={1}>📍 {b.pickup?.address}</Text>
-                <View style={[s.historyPayTag, b.paymentMethod === 'cod' ? s.historyTagCod : s.historyTagUpi]}>
-                  <Text style={s.historyPayText}>
-                    {b.paymentMethod === 'cod' ? '💵 COD' : '💳 UPI'}
-                    {b.paymentMethod === 'cod' && b.commission?.status === 'pending_from_driver'
-                      ? ' — Commission Pending' : ''}
-                  </Text>
-                </View>
-              </View>
-            ))}
+              );
+            })}
           </View>
         )}
       </ScrollView>
@@ -195,4 +217,30 @@ const s = StyleSheet.create({
   historyTagUpi: { backgroundColor: '#EFF6FF' },
   historyTagCod: { backgroundColor: '#FEF3C7' },
   historyPayText: { fontSize: 11, fontWeight: '600', color: '#1F2937' },
+  // Fare breakdown styles
+  fareBreakdown: { 
+    marginTop: 10, 
+    padding: 10, 
+    backgroundColor: '#F9FAFB', 
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  fareRow: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    paddingVertical: 3,
+  },
+  fareRowTotal: { 
+    borderTopWidth: 1, 
+    borderTopColor: '#D1D5DB', 
+    marginTop: 4, 
+    paddingTop: 6,
+  },
+  fareLabel: { fontSize: 12, color: '#6B7280' },
+  fareValue: { fontSize: 12, fontWeight: '600', color: '#1F2937' },
+  fareLabelRed: { fontSize: 12, color: '#EF4444' },
+  fareValueRed: { fontSize: 12, fontWeight: '600', color: '#EF4444' },
+  fareLabelTotal: { fontSize: 13, fontWeight: '700', color: '#1F2937' },
+  fareValueTotal: { fontSize: 14, fontWeight: '800', color: '#10B981' },
 });
