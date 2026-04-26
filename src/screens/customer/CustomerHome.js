@@ -13,36 +13,37 @@ import {
   View,
   SafeAreaView,
   Dimensions,
+  Linking,
 } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import { addDoc, collection, serverTimestamp, doc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import { db, functions, auth } from '../../../firebase';
+import { db, functions, auth, GOOGLE_MAPS_API_KEY } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
 
 const { width, height } = Dimensions.get('window');
-const GOOGLE_API_KEY = 'AIzaSyDqEdCuxppmgcSK0i9SbEWjw9tnsn9YnCI';
+const GOOGLE_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY;
 
 const DEFAULT_REGION = { latitude: 19.076, longitude: 72.8777, latitudeDelta: 0.055, longitudeDelta: 0.055 };
 const SERVICES = [
-  { id: 'parcel', label: 'Send Package', fallbackIcon: 'cube' },
-  { id: 'ride', label: 'Book a Ride', fallbackIcon: 'car' },
+  { id: 'parcel', label: 'Send Package' },
+  { id: 'ride', label: 'Book a Ride' },
 ];
 
 const quoteFare = httpsCallable(functions, 'quoteFare');
 const generateOtp = () => Math.floor(1000 + Math.random() * 9000).toString();
 const generateSessionToken = () => Math.random().toString(36).substring(2) + Date.now().toString(36);
 
-// Smarter Icon Mapping based on your exact backend config
 const vehicleIconName = (vehicleId = '') => {
   const id = vehicleId.toLowerCase();
   if (id.includes('bike') || id.includes('scooty')) return 'bicycle';
-  if (id.includes('tempo') || id.includes('hatti')) return 'bus';
-  if (id.includes('3wheeler') || id.includes('auto')) return 'car-sport';
-  if (id.includes('7') || id.includes('seater') || id.includes('suv')) return 'people';
+  if (id.includes('3wheeler') || id.includes('auto')) return 'car-sport-outline';
+  if (id.includes('hatti') || id.includes('tempo')) return 'bus-outline';
+  if (id.includes('7') || id.includes('seater') || id.includes('suv')) return 'people-outline';
+  if (id.includes('hatchback')) return 'car-outline';
   return 'car';
 };
 
@@ -73,7 +74,6 @@ export default function CustomerHome() {
   const regionRef = useRef(DEFAULT_REGION);
 
   const [bookingPhase, setBookingPhase] = useState('pickup'); 
-
   const [serviceType, setServiceType] = useState('parcel');
   const [selectedVehicle, setSelectedVehicle] = useState('');
   const [pickupLocation, setPickupLocation] = useState(null);
@@ -106,13 +106,6 @@ export default function CustomerHome() {
 
   const selectedVehicleData = useMemo(() => vehicleOptions.find(v => v.id === selectedVehicle) || vehicleOptions[0] || {}, [selectedVehicle, vehicleOptions]);
   const totalFare = fareQuote?.fare ? Math.round((fareQuote.fare.totalInPaise || 0) / 100) : 0;
-
-  const getServiceIcons = (svcId) => {
-    const source = svcId === 'parcel' ? settings.parcelVehicles : settings.rideVehicles;
-    const opts = (source || []).filter(v => v.enabled !== false);
-    const icons = Array.from(new Set(opts.map(v => vehicleIconName(v.id))));
-    return icons.length > 0 ? icons : [SERVICES.find(s => s.id === svcId).fallbackIcon];
-  };
 
   useEffect(() => {
     if (!currentBookingId) {
@@ -157,7 +150,6 @@ export default function CustomerHome() {
 
   useEffect(() => {
     if (bookingPhase !== 'fare' || !pickupLocation || !dropLocation || !selectedVehicle) return;
-
     let cancelled = false;
     setQuoteLoading(true);
 
@@ -220,6 +212,30 @@ export default function CustomerHome() {
     regionRef.current = region;
     setMapMarker(coordinate);
     mapRef.current?.animateToRegion(region, 400);
+  };
+
+  const useCurrentLocation = async () => {
+    try {
+      setMapLoading(true);
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission denied', 'Location permission is required to use this feature.');
+        return;
+      }
+      const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const coord = { latitude: current.coords.latitude, longitude: current.coords.longitude };
+      moveMapTo(coord);
+      // Reverse geocode and prefill the search bar
+      try {
+        const places = await Location.reverseGeocodeAsync(coord);
+        const address = formatAddress(places?.[0], '');
+        if (address) setPlaceQuery(address);
+      } catch {}
+    } catch (e) {
+      Alert.alert('Error', 'Could not get current location.');
+    } finally {
+      setMapLoading(false);
+    }
   };
 
   const selectPlace = async (place_id) => {
@@ -352,10 +368,17 @@ export default function CustomerHome() {
     }
   };
 
-  // --- RENDER HELPERS ---
-
   const renderSearchPhase = () => (
     <View style={styles.bottomSheet}>
+      {/* Floating "Use Current Location" button — sits above the sheet, moves with it */}
+      <TouchableOpacity
+        style={styles.locateBtn}
+        onPress={useCurrentLocation}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="locate" size={22} color="#111827" />
+      </TouchableOpacity>
+
       <View style={styles.sheetHeader}>
         {bookingPhase === 'drop' && (
           <TouchableOpacity style={styles.backBtn} onPress={goBack}>
@@ -390,7 +413,9 @@ export default function CustomerHome() {
           style={styles.searchResultsList}
           renderItem={({ item }) => (
             <TouchableOpacity style={styles.searchResultRow} onPress={() => selectPlace(item.place_id)}>
-              <Ionicons name="location-outline" size={20} color="#6B7280" />
+              <View style={styles.resultIconBg}>
+                <Ionicons name="location-outline" size={18} color="#6B7280" />
+              </View>
               <View style={styles.resultTextBlock}>
                 <Text style={styles.resMain} numberOfLines={1}>{item.main_text}</Text>
                 <Text style={styles.resSub} numberOfLines={1}>{item.secondary_text}</Text>
@@ -398,7 +423,7 @@ export default function CustomerHome() {
             </TouchableOpacity>
           )}
         />
-      ) : (
+      ) : mapMarker ? (
         <View style={styles.manualAddressWrapper}>
           <TextInput
             style={styles.manualInput}
@@ -408,84 +433,91 @@ export default function CustomerHome() {
             placeholderTextColor="#9CA3AF"
           />
         </View>
-      )}
+      ) : null}
 
-      <TouchableOpacity style={styles.actionButton} onPress={confirmLocation} disabled={mapLoading}>
-        {mapLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.actionButtonText}>Confirm {bookingPhase === 'pickup' ? 'Pickup' : 'Dropoff'}</Text>}
+      <TouchableOpacity style={styles.confirmLocBtn} onPress={confirmLocation} disabled={mapLoading}>
+        {mapLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.confirmLocText}>Confirm {bookingPhase === 'pickup' ? 'Pickup' : 'Dropoff'}</Text>}
       </TouchableOpacity>
     </View>
   );
 
-  // REDESIGNED VERTICAL LIST FARE UI
   const renderFarePhase = () => (
     <View style={styles.fareSheetContainer}>
-      {/* Fixed Header */}
-      <View style={styles.sheetHeader}>
+      <View style={styles.sheetHeaderFixed}>
         <TouchableOpacity style={styles.backBtn} onPress={goBack}>
           <Ionicons name="arrow-back" size={24} color="#111827" />
         </TouchableOpacity>
-        <Text style={styles.sheetTitle}>Confirm Booking</Text>
+        <Text style={styles.sheetTitleFixed}>Confirm Booking</Text>
       </View>
 
-      {/* Scrollable List of Vehicles */}
-      <ScrollView 
-        style={styles.scrollableVehicleList} 
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 20 }}
-      >
+      <ScrollView style={styles.scrollableMiddle} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 16 }}>
         <View style={styles.routeSummaryBox}>
           <View style={styles.routeSummaryRow}>
             <View style={styles.greenDot} />
-            <Text style={styles.routeSummaryText} numberOfLines={1}>{pickupLocation?.address}</Text>
+            <Text style={styles.routeSummaryText} numberOfLines={3}>{pickupLocation?.address}</Text>
           </View>
           <View style={styles.routeSummaryDivider} />
           <View style={styles.routeSummaryRow}>
             <View style={styles.redSquare} />
-            <Text style={styles.routeSummaryText} numberOfLines={1}>{dropLocation?.address}</Text>
+            <Text style={styles.routeSummaryText} numberOfLines={3}>{dropLocation?.address}</Text>
           </View>
         </View>
 
+        <Text style={styles.sheetTitleSmall}>Select Vehicle</Text>
+        
         {vehicleOptions.length === 0 ? (
           <View style={styles.emptyVehicles}><ActivityIndicator color="#111827" /><Text style={styles.emptyVehiclesText}>Loading vehicles...</Text></View>
         ) : (
-          <View style={styles.vehicleListContainer}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalVehicleScroll}>
             {vehicleOptions.map(v => {
               const active = selectedVehicle === v.id;
               return (
-                <TouchableOpacity 
-                  key={v.id} 
-                  style={[styles.vehicleRow, active && styles.vehicleRowActive]} 
-                  onPress={() => setSelectedVehicle(v.id)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.vehicleIconCircle}>
+                <TouchableOpacity key={v.id} style={[styles.vehicleCardHorizontal, active && styles.vehicleCardActive]} onPress={() => setSelectedVehicle(v.id)} activeOpacity={0.8}>
+                  <View style={[styles.vehicleIconCircle, active && styles.vehicleIconCircleActive]}>
                     <Ionicons name={vehicleIconName(v.id)} size={28} color={active ? '#111827' : '#6B7280'} />
                   </View>
-                  <View style={styles.vehicleDetails}>
-                    <Text style={styles.vehicleName}>{v.label}</Text>
-                    {/* Properly showing the capacity description here */}
-                    <Text style={styles.vehicleCapacity}>{v.capacity || 'Standard Capacity'}</Text>
-                  </View>
-                  <View style={styles.vehiclePriceBox}>
-                    <Text style={styles.vehiclePrice}>₹{v.baseFare}+</Text>
-                  </View>
+                  <Text style={[styles.vName, active && styles.vNameActive]} numberOfLines={1}>{v.label}</Text>
+                  <Text style={styles.vCap} numberOfLines={1}>{v.capacity || 'Standard'}</Text>
+                  <Text style={[styles.vPrice, active && styles.vPriceActive]}>₹{v.baseFare}+</Text>
                 </TouchableOpacity>
               );
             })}
-          </View>
+          </ScrollView>
         )}
 
         {serviceType === 'parcel' && (
           <TextInput style={styles.packageInput} value={itemsDescription} onChangeText={setItemsDescription} placeholder="E.g. Documents, Clothes..." placeholderTextColor="#9CA3AF" />
         )}
+
+        <View style={styles.receiptBox}>
+          {fareQuote?.fare ? (
+            <>
+              <View style={styles.receiptRow}>
+                <Text style={styles.receiptLabel}>Base Fare</Text>
+                <Text style={styles.receiptValue}>₹{Math.round((fareQuote.fare.baseFare || 0) / 100)}</Text>
+              </View>
+              <View style={styles.receiptRow}>
+                <Text style={styles.receiptLabel}>
+                  Distance{fareQuote.distanceKm ? ` (${fareQuote.distanceKm} km)` : ''}
+                </Text>
+                <Text style={styles.receiptValue}>₹{Math.round((fareQuote.fare.distanceFare || 0) / 100)}</Text>
+              </View>
+              <View style={styles.receiptDivider} />
+              <View style={styles.receiptRow}>
+                <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+                <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>
+              </View>
+            </>
+          ) : (
+            <View style={styles.receiptRow}>
+              <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+              {quoteLoading ? <ActivityIndicator size="small" color="#111827" /> : <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>}
+            </View>
+          )}
+        </View>
       </ScrollView>
 
-      {/* Fixed Bottom Action Area */}
-      <View style={styles.fareFooter}>
-        <View style={styles.fareFooterDetails}>
-          <Text style={styles.totalFareLabel}>Total Fare {fareQuote?.distanceKm ? `(${fareQuote.distanceKm} km)` : ''}</Text>
-          {quoteLoading ? <ActivityIndicator size="small" color="#111827" /> : <Text style={styles.totalFareValue}>₹{totalFare}</Text>}
-        </View>
+      <View style={styles.pinnedBottom}>
         <TouchableOpacity style={[styles.actionButton, actionLoading && styles.disabledBtn]} onPress={handleCreateBooking} disabled={actionLoading || quoteLoading || vehicleOptions.length === 0}>
           {actionLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.actionButtonText}>Confirm & Book</Text>}
         </TouchableOpacity>
@@ -543,18 +575,49 @@ export default function CustomerHome() {
           </View>
         </View>
 
-        <TouchableOpacity style={styles.cancelBtn} onPress={cancelBooking} disabled={actionLoading}>
-          {actionLoading ? <ActivityIndicator color="#EF4444" /> : <Text style={styles.cancelBtnText}>Cancel Booking</Text>}
-        </TouchableOpacity>
+        {/* Driver details — shown after acceptance, hidden once trip ends */}
+        {activeBooking.driverName &&
+          !['searching', 'completed', 'cancelled', 'cancelled_by_customer'].includes(activeBooking.status) && (
+          <View style={styles.driverCard}>
+            <View style={styles.driverAvatar}>
+              <Ionicons name="person" size={22} color="#92400E" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.driverCardLabel}>YOUR DRIVER</Text>
+              <Text style={styles.driverCardName}>{activeBooking.driverName}</Text>
+              {activeBooking.driverVehicleLabel || activeBooking.driverVehicleNumber ? (
+                <Text style={styles.driverCardVehicle} numberOfLines={1}>
+                  {[activeBooking.driverVehicleLabel, activeBooking.driverVehicleNumber].filter(Boolean).join(' • ')}
+                </Text>
+              ) : null}
+            </View>
+            {activeBooking.driverPhone ? (
+              <TouchableOpacity
+                style={styles.driverCallBtn}
+                onPress={() => Linking.openURL(`tel:${activeBooking.driverPhone}`)}
+              >
+                <Ionicons name="call" size={18} color="#FFFFFF" />
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        )}
+
+        {/* 👇 FIX: Cancel button disappears once status is 'picked_up' or higher */}
+        {['searching', 'accepted', 'arrived'].includes(activeBooking.status) && (
+          <TouchableOpacity style={styles.cancelBtn} onPress={cancelBooking} disabled={actionLoading}>
+            {actionLoading ? <ActivityIndicator color="#EF4444" /> : <Text style={styles.cancelBtnText}>Cancel Booking</Text>}
+          </TouchableOpacity>
+        )}
       </View>
     );
   };
 
   return (
     <View style={styles.flex}>
+      {/* 👇 FIX: Bruteforce Map Dimensions to prevent disappearing blank screens */}
       <MapView
         ref={mapRef}
-        style={StyleSheet.absoluteFillObject}
+        style={{ width: width, height: height, position: 'absolute', top: 0, left: 0, zIndex: -1 }}
         mapType="standard"
         showsUserLocation={true}
         showsMyLocationButton={false}
@@ -594,19 +657,26 @@ export default function CustomerHome() {
            <View style={styles.serviceToggleContainer}>
             {SERVICES.map(item => {
               const isActive = serviceType === item.id;
-              const icons = getServiceIcons(item.id);
               return (
                 <TouchableOpacity key={item.id} style={[styles.servicePill, isActive && styles.servicePillActive]} onPress={() => { setServiceType(item.id); resetToHome(); }}>
-                  <View style={styles.pillIconRow}>
-                    {icons.map((ic, idx) => (
-                      <Ionicons key={idx} name={ic} size={14} color={isActive ? '#FFF' : '#4B5563'} />
-                    ))}
-                  </View>
                   <Text style={[styles.servicePillText, isActive && styles.servicePillTextActive]}>{item.label}</Text>
                 </TouchableOpacity>
               );
             })}
           </View>
+
+          {bookingPhase === 'pickup' && vehicleOptions.length > 0 && (
+            <View style={styles.compactPreviewPanel}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.compactPreviewScroll}>
+                {vehicleOptions.map((v, index) => (
+                  <View key={index} style={styles.compactPreviewItem}>
+                    <Ionicons name={vehicleIconName(v.id)} size={22} color="#4B5563" />
+                    <Text style={styles.compactPreviewText}>{v.label}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          )}
         </SafeAreaView>
       )}
 
@@ -620,96 +690,94 @@ export default function CustomerHome() {
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: '#F4F5F9' },
-  topMenuContainer: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 20, paddingTop: Platform.OS === 'android' ? 40 : 10 },
-  
-  serviceToggleContainer: { flexDirection: 'row', backgroundColor: '#FFF', borderRadius: 100, padding: 4, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 10, elevation: 5 },
-  servicePill: { flex: 1, height: 48, borderRadius: 100, alignItems: 'center', justifyContent: 'center', flexDirection: 'row' },
+  flex: { flex: 1, backgroundColor: '#F3F4F6' },
+  topMenuContainer: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 16, paddingTop: Platform.OS === 'android' ? 40 : 16 },
+  serviceToggleContainer: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderRadius: 16, padding: 4, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, elevation: 5 },
+  servicePill: { flex: 1, height: 46, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexDirection: 'row' },
   servicePillActive: { backgroundColor: '#111827' },
-  servicePillText: { fontSize: 14, fontWeight: '700', color: '#4B5563' },
-  servicePillTextActive: { color: '#FFF' },
-  pillIconRow: { flexDirection: 'row', gap: 4, marginRight: 8 }, 
-
-  // Map Pins
+  servicePillText: { fontSize: 14, fontWeight: '700', color: '#6B7280' },
+  servicePillTextActive: { color: '#FFFFFF' },
+  compactPreviewPanel: { backgroundColor: '#FFFFFF', borderRadius: 12, marginTop: 8, paddingVertical: 10, paddingHorizontal: 12, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, elevation: 4, alignSelf: 'center', width: '100%' },
+  compactPreviewScroll: { gap: 18, alignItems: 'center' },
+  compactPreviewItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  compactPreviewText: { fontSize: 13, fontWeight: '700', color: '#4B5563' },
   centerPinContainer: { position: 'absolute', top: '50%', left: '50%', marginLeft: -24, marginTop: -48, alignItems: 'center' },
-  centerBalloon: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 5, elevation: 5 },
+  centerBalloon: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 6, elevation: 6 },
   centerTail: { width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 12, borderLeftColor: 'transparent', borderRightColor: 'transparent', marginTop: -2 },
-  centerShadow: { width: 16, height: 8, borderRadius: 8, backgroundColor: '#000', opacity: 0.15, marginTop: 2, transform: [{ scaleX: 2 }] },
-  markerPin: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#FFF', shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 4, elevation: 4 },
-
-  // Bottom Sheet Standard Wrapper
+  centerShadow: { width: 14, height: 6, borderRadius: 7, backgroundColor: '#000', opacity: 0.15, marginTop: 4, transform: [{ scaleX: 2.5 }] },
+  locateBtn: { position: 'absolute', right: 16, top: -60, width: 46, height: 46, borderRadius: 23, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 10, zIndex: 100 },
+  markerPin: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', borderWidth: 2.5, borderColor: '#FFF', shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 4, elevation: 4 },
   bottomSheetWrapper: { position: 'absolute', bottom: 0, left: 0, right: 0 },
-  bottomSheet: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.1, shadowRadius: 10, elevation: 15 },
-  
-  // NEW: Fare Sheet Container (Takes up exactly 55% of screen to allow scrolling)
-  fareSheetContainer: { height: height * 0.55, backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.1, shadowRadius: 10, elevation: 15 },
-  scrollableVehicleList: { flex: 1, paddingHorizontal: 20 },
-  fareFooter: { padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, backgroundColor: '#FFF', borderTopWidth: 1, borderTopColor: '#F3F4F6' },
-  fareFooterDetails: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-
-  sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, paddingHorizontal: 20, paddingTop: 20 },
-  backBtn: { width: 40, height: 40, alignItems: 'flex-start', justifyContent: 'center', marginRight: 4 },
-  sheetTitle: { fontSize: 22, fontWeight: '800', color: '#111827' },
-  sheetTitleSmall: { fontSize: 18, fontWeight: '800', color: '#111827', marginBottom: 12, marginTop: 8 },
-
-  // Route Summary
-  routeSummaryBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#E5E7EB' },
-  routeSummaryRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  greenDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#10B981' },
-  redSquare: { width: 10, height: 10, backgroundColor: '#EF4444' },
-  routeSummaryText: { flex: 1, fontSize: 14, color: '#4B5563', fontWeight: '500' },
+  bottomSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, maxHeight: height * 0.45, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.06, shadowRadius: 12, elevation: 16 },
+  fareSheetContainer: { height: height * 0.65, backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
+  sheetHeaderFixed: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 20, marginBottom: 16 },
+  sheetTitleFixed: { fontSize: 22, fontWeight: '800', color: '#111827' },
+  scrollableMiddle: { flex: 1, paddingHorizontal: 20 },
+  pinnedBottom: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: Platform.OS === 'ios' ? 34 : 20, borderTopWidth: 1, borderTopColor: '#F3F4F6', backgroundColor: '#FFFFFF' },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  backBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  sheetTitle: { fontSize: 18, fontWeight: '800', color: '#111827' },
+  sheetTitleSmall: { fontSize: 16, fontWeight: '800', color: '#111827', marginBottom: 12, marginTop: 8 },
+  routeSummaryBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 16, marginBottom: 18, borderWidth: 1, borderColor: '#F3F4F6' },
+  routeSummaryRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  greenDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#10B981', marginTop: 5 },
+  redSquare: { width: 10, height: 10, borderRadius: 3, backgroundColor: '#EF4444', marginTop: 5 },
+  routeSummaryText: { flex: 1, fontSize: 14, color: '#374151', fontWeight: '600' },
   routeSummaryDivider: { height: 16, width: 2, backgroundColor: '#E5E7EB', marginLeft: 4, marginVertical: 4 },
-
-  // Search
-  searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F3F4F6', borderRadius: 14, paddingHorizontal: 16, height: 54, marginBottom: 12 },
-  searchInputArea: { flex: 1, marginLeft: 10, fontSize: 16, color: '#111827', fontWeight: '500' },
-  searchResultsList: { maxHeight: 180 },
-  searchResultRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
-  resultTextBlock: { marginLeft: 12, flex: 1 },
-  resMain: { fontSize: 15, fontWeight: '600', color: '#111827' },
-  resSub: { fontSize: 13, color: '#6B7280', marginTop: 2 },
+  searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F9FAFB', borderRadius: 12, paddingHorizontal: 14, height: 46, marginBottom: 10, borderWidth: 1, borderColor: '#F3F4F6' },
+  searchInputArea: { flex: 1, marginLeft: 12, fontSize: 16, color: '#111827', fontWeight: '500' },
+  searchResultsList: { maxHeight: 200 },
+  searchResultRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
+  resultIconBg: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  resultTextBlock: { marginLeft: 14, flex: 1 },
+  resMain: { fontSize: 15, fontWeight: '700', color: '#111827', marginBottom: 2 },
+  resSub: { fontSize: 13, color: '#6B7280' },
   manualAddressWrapper: { marginBottom: 16 },
-  manualInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, padding: 14, fontSize: 15, color: '#111827' },
-
-  // NEW: Vertical Vehicle List UI
+  manualInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 16, padding: 16, fontSize: 15, color: '#111827' },
   emptyVehicles: { height: 120, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F9FAFB', borderRadius: 16, marginBottom: 16 },
-  emptyVehiclesText: { color: '#6B7280', marginTop: 8, fontWeight: '500' },
-  vehicleListContainer: { marginBottom: 12 },
-  vehicleRow: { flexDirection: 'row', alignItems: 'center', padding: 16, backgroundColor: '#FFF', borderRadius: 16, marginBottom: 10, borderWidth: 2, borderColor: '#F3F4F6' },
-  vehicleRowActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
-  vehicleIconCircle: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginRight: 14 },
-  vehicleDetails: { flex: 1 },
-  vehicleName: { fontSize: 16, fontWeight: '800', color: '#111827', marginBottom: 4 },
-  vehicleCapacity: { fontSize: 13, color: '#6B7280', fontWeight: '500' },
-  vehiclePriceBox: { alignItems: 'flex-end', justifyContent: 'center' },
-  vehiclePrice: { fontSize: 18, fontWeight: '900', color: '#111827' },
-  
-  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, padding: 14, fontSize: 15, color: '#111827', marginBottom: 16 },
-  
-  totalFareLabel: { fontSize: 16, fontWeight: '700', color: '#4B5563' },
-  totalFareValue: { fontSize: 26, fontWeight: '900', color: '#111827' },
-
-  // Active Booking
+  emptyVehiclesText: { color: '#6B7280', marginTop: 8, fontWeight: '600' },
+  horizontalVehicleScroll: { paddingBottom: 12, gap: 8, paddingRight: 16, paddingTop: 4 },
+  vehicleCardHorizontal: { width: 60, paddingVertical: 10, paddingHorizontal: 4, backgroundColor: '#FFFFFF', borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#F3F4F6' },
+  vehicleCardActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
+  vehicleIconCircle: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  vehicleIconCircleActive: { backgroundColor: '#E5E7EB' },
+  vName: { fontSize: 11, fontWeight: '700', color: '#4B5563', textAlign: 'center' },
+  vNameActive: { color: '#111827' },
+  vCap: { display: 'none' },
+  vPrice: { fontSize: 11, fontWeight: '800', color: '#6B7280', marginTop: 2 },
+  vPriceActive: { color: '#10B981' },
+  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 16, padding: 16, fontSize: 15, color: '#111827', marginBottom: 16 },
+  receiptBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 18, marginBottom: 16 },
+  receiptRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  receiptLabel: { fontSize: 14, color: '#6B7280', fontWeight: '500' },
+  receiptValue: { fontSize: 15, color: '#374151', fontWeight: '700' },
+  receiptDivider: { height: 1, backgroundColor: '#E5E7EB', marginVertical: 8 },
+  receiptTotalLabel: { fontSize: 15, fontWeight: '700', color: '#6B7280' },
+  receiptTotalValue: { fontSize: 26, fontWeight: '900', color: '#111827' },
   activeHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  statusHeaderExpanded: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#ECFDF5', padding: 16, borderRadius: 12, marginRight: 12 },
-  statusText: { fontSize: 15, fontWeight: '700', color: '#047857', flexShrink: 1 },
-  minimizeBtn: { width: 44, height: 44, backgroundColor: '#F3F4F6', borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
-  
-  otpCard: { flexDirection: 'row', backgroundColor: '#F9FAFB', borderRadius: 12, padding: 16, marginBottom: 20, borderWidth: 1, borderColor: '#E5E7EB' },
+  statusHeaderExpanded: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', padding: 16, borderRadius: 16, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  statusText: { fontSize: 15, fontWeight: '800', color: '#10B981', flexShrink: 1 },
+  minimizeBtn: { width: 48, height: 48, backgroundColor: '#F9FAFB', borderRadius: 24, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F3F4F6' },
+  otpCard: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 1, borderColor: '#F3F4F6', shadowColor: '#000', shadowOpacity: 0.03, shadowRadius: 8, elevation: 2 },
   otpBlock: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  otpLabel: { fontSize: 13, color: '#6B7280', fontWeight: '600', marginBottom: 4 },
-  otpValue: { fontSize: 24, color: '#111827', fontWeight: '900', letterSpacing: 2 },
-  otpMasked: { fontSize: 14, color: '#9CA3AF', fontWeight: '600', marginTop: 4 },
-  otpDivider: { width: 1, backgroundColor: '#E5E7EB', marginHorizontal: 16 },
-
-  minimizedSheet: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.1, shadowRadius: 10, elevation: 15 },
+  otpLabel: { fontSize: 12, color: '#9CA3AF', fontWeight: '700', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
+  otpValue: { fontSize: 26, color: '#111827', fontWeight: '900', letterSpacing: 3 },
+  otpMasked: { fontSize: 14, color: '#9CA3AF', fontWeight: '700', marginTop: 4 },
+  otpDivider: { width: 1, backgroundColor: '#F3F4F6', marginHorizontal: 16 },
+  minimizedSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
   minimizedRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  minimizedLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#ECFDF5', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12, flex: 1, marginRight: 12 },
-
-  // Buttons
-  actionButton: { height: 56, backgroundColor: '#111827', borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  disabledBtn: { backgroundColor: '#9CA3AF' },
-  actionButtonText: { color: '#FFF', fontSize: 18, fontWeight: '800' },
-  cancelBtn: { height: 50, backgroundColor: '#FFF', borderWidth: 2, borderColor: '#FEE2E2', borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  cancelBtnText: { color: '#EF4444', fontSize: 16, fontWeight: '700' },
+  minimizedLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16, flex: 1, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  actionButton: { height: 56, backgroundColor: '#111827', borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#111827', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 6 },
+  confirmLocBtn: { height: 44, backgroundColor: '#111827', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  confirmLocText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.2 },
+  disabledBtn: { backgroundColor: '#D1D5DB', shadowOpacity: 0 },
+  actionButtonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
+  cancelBtn: { height: 52, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#FEE2E2', borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  driverCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FEF3C7', borderRadius: 16, marginBottom: 12 },
+  driverAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#FDE68A', alignItems: 'center', justifyContent: 'center' },
+  driverCardLabel: { fontSize: 10, fontWeight: '800', color: '#92400E', letterSpacing: 0.5 },
+  driverCardName: { fontSize: 15, fontWeight: '700', color: '#111827', marginTop: 2 },
+  driverCardVehicle: { fontSize: 12, color: '#6B7280', marginTop: 2, fontWeight: '500' },
+  driverCallBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#10B981', alignItems: 'center', justifyContent: 'center' },
+  cancelBtnText: { color: '#EF4444', fontSize: 16, fontWeight: '800' },
 });
