@@ -1,420 +1,783 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, TextInput,
-  ScrollView, Alert, ActivityIndicator, Linking, Animated,
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  SafeAreaView,
+  Dimensions,
+  Linking,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { collection, addDoc, serverTimestamp, query, where, onSnapshot } from 'firebase/firestore';
-import { db } from '../../../firebase';
+import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
+import { Ionicons } from '@expo/vector-icons';
+import { addDoc, collection, serverTimestamp, doc, onSnapshot, updateDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions, auth, GOOGLE_MAPS_API_KEY } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
 
-const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'in_progress', 'at_drop'];
+const { width, height } = Dimensions.get('window');
+const GOOGLE_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY;
 
-function getStatusColor(status) {
+const DEFAULT_REGION = { latitude: 19.076, longitude: 72.8777, latitudeDelta: 0.055, longitudeDelta: 0.055 };
+const SERVICES = [
+  { id: 'parcel', label: 'Send Package' },
+  { id: 'ride', label: 'Book a Ride' },
+];
+
+const quoteFare = httpsCallable(functions, 'quoteFare');
+const generateOtp = () => Math.floor(1000 + Math.random() * 9000).toString();
+const generateSessionToken = () => Math.random().toString(36).substring(2) + Date.now().toString(36);
+
+const vehicleIconName = (vehicleId = '') => {
+  const id = vehicleId.toLowerCase();
+  if (id.includes('bike') || id.includes('scooty')) return 'bicycle';
+  if (id.includes('3wheeler') || id.includes('auto')) return 'car-sport-outline';
+  if (id.includes('hatti') || id.includes('tempo')) return 'bus-outline';
+  if (id.includes('7') || id.includes('seater') || id.includes('suv')) return 'people-outline';
+  if (id.includes('hatchback')) return 'car-outline';
+  return 'car';
+};
+
+function formatAddress(place, fallback) {
+  if (!place) return fallback;
+  return [place.name, place.street, place.district, place.city, place.region, place.postalCode].filter(Boolean).join(', ') || fallback;
+}
+
+const getFriendlyStatus = (status) => {
   switch (status) {
-    case 'searching': return '#3B82F6';
-    case 'accepted': return '#F59E0B';
-    case 'at_pickup': return '#8B5CF6';
-    case 'in_progress': return '#10B981';
-    case 'at_drop': return '#10B981';
-    default: return '#9CA3AF';
+    case 'searching': return 'Looking for nearby drivers...';
+    case 'accepted': return 'Driver is on the way';
+    case 'arrived': return 'Driver has arrived at pickup';
+    case 'picked_up': return 'In transit to dropoff';
+    case 'reached': 
+    case 'reached_dropoff': return 'Driver reached dropoff';
+    case 'completed': return 'Booking completed';
+    case 'cancelled': 
+    case 'cancelled_by_customer': return 'Booking cancelled';
+    default: return `Status: ${status}`;
   }
-}
-
-function getStatusLabel(status) {
-  switch (status) {
-    case 'searching': return 'Finding Driver';
-    case 'accepted': return '🚗 Driver Coming';
-    case 'at_pickup': return '📍 Driver at Pickup';
-    case 'in_progress': return '🚚 On the Way';
-    case 'at_drop': return '📌 Driver at Drop';
-    default: return status;
-  }
-}
-
-// Pulsing dot for active status
-function PulsingDot({ color = '#3B82F6' }) {
-  const scale = useRef(new Animated.Value(1)).current;
-  const opacity = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    const pulse = Animated.loop(
-      Animated.parallel([
-        Animated.sequence([
-          Animated.timing(scale, { toValue: 1.8, duration: 700, useNativeDriver: true }),
-          Animated.timing(scale, { toValue: 1, duration: 700, useNativeDriver: true }),
-        ]),
-        Animated.sequence([
-          Animated.timing(opacity, { toValue: 0.2, duration: 700, useNativeDriver: true }),
-          Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
-        ]),
-      ])
-    );
-    pulse.start();
-    return () => pulse.stop();
-  }, []);
-
-  return (
-    <Animated.View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: color, opacity, transform: [{ scale }] }} />
-  );
-}
-
-// Bouncing dots for "Finding Driver"
-function FindingDriverAnimation() {
-  const dots = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current];
-
-  useEffect(() => {
-    const anims = dots.map((dot, i) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(i * 150),
-          Animated.timing(dot, { toValue: -10, duration: 350, useNativeDriver: true }),
-          Animated.timing(dot, { toValue: 0, duration: 350, useNativeDriver: true }),
-          Animated.delay(450),
-        ])
-      )
-    );
-    Animated.parallel(anims).start();
-    return () => anims.forEach((a) => a.stop());
-  }, []);
-
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12 }}>
-      {dots.map((dot, i) => (
-        <Animated.View
-          key={i}
-          style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#3B82F6', marginHorizontal: 5, transform: [{ translateY: dot }] }}
-        />
-      ))}
-    </View>
-  );
-}
+};
 
 export default function CustomerHome() {
   const { user, profile } = useAuth();
-  const { settings } = useAppSettings(); // ← Get current commission rate // ← Get settings from Firestore
-  const [showBookingForm, setShowBookingForm] = useState(false);
-  const [selectedVehicle, setSelectedVehicle] = useState('chota_hatti');
-  const [pickupAddress, setPickupAddress] = useState('');
-  const [dropAddress, setDropAddress] = useState('');
+  const { settings } = useAppSettings();
+  const mapRef = useRef(null);
+  const regionRef = useRef(DEFAULT_REGION);
+
+  const [bookingPhase, setBookingPhase] = useState('pickup'); 
+  const [serviceType, setServiceType] = useState('parcel');
+  const [selectedVehicle, setSelectedVehicle] = useState('');
+  const [pickupLocation, setPickupLocation] = useState(null);
+  const [dropLocation, setDropLocation] = useState(null);
   const [itemsDescription, setItemsDescription] = useState('');
-  const [distance, setDistance] = useState(5);
-  const [paymentMethod, setPaymentMethod] = useState('upi');
-  const [loading, setLoading] = useState(false);
-  const [activeBookings, setActiveBookings] = useState([]); // FIX: plural — show all
+  const [paymentMethod, setPaymentMethod] = useState('cod');
+
+  const [mapRegion, setMapRegion] = useState(DEFAULT_REGION);
+  const [mapMarker, setMapMarker] = useState({ latitude: DEFAULT_REGION.latitude, longitude: DEFAULT_REGION.longitude });
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [manualAddress, setManualAddress] = useState('');
+  const [placeResults, setPlaceResults] = useState([]);
+  const [placesLoading, setPlacesLoading] = useState(false);
+  const [isPinDragged, setIsPinDragged] = useState(false);
+  const [sessionToken, setSessionToken] = useState(generateSessionToken());
+  const [mapLoading, setMapLoading] = useState(false);
+
+  const [fareQuote, setFareQuote] = useState(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
+  
+  const [currentBookingId, setCurrentBookingId] = useState(null);
+  const [activeBooking, setActiveBooking] = useState(null);
+  const [isMinimized, setIsMinimized] = useState(false);
+
+  const vehicleOptions = useMemo(() => {
+    const source = serviceType === 'parcel' ? settings.parcelVehicles : settings.rideVehicles;
+    return (source || []).filter(v => v.enabled !== false);
+  }, [serviceType, settings.parcelVehicles, settings.rideVehicles]);
+
+  const selectedVehicleData = useMemo(() => vehicleOptions.find(v => v.id === selectedVehicle) || vehicleOptions[0] || {}, [selectedVehicle, vehicleOptions]);
+  const totalFare = fareQuote?.fare ? Math.round((fareQuote.fare.totalInPaise || 0) / 100) : 0;
 
   useEffect(() => {
-    if (!user?.uid) return;
-    const q = query(collection(db, 'bookings'), where('customerId', '==', user.uid));
-    const unsub = onSnapshot(q, (snap) => {
-      const bookings = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      // FIX: filter ALL active bookings, not just the first one
-      const active = bookings.filter((b) => ACTIVE_STATUSES.includes(b.status));
-      setActiveBookings(active);
+    if (!currentBookingId) {
+      setActiveBooking(null);
+      return;
+    }
+    const unsubscribe = onSnapshot(doc(db, 'bookings', currentBookingId), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setActiveBooking({ id: docSnap.id, ...data });
+        if (data.status === 'cancelled' || data.status === 'completed') {
+           Alert.alert("Booking Update", `This booking is marked as ${data.status}.`);
+           resetToHome();
+        }
+      }
     });
-    return () => unsub();
-  }, [user?.uid]);
+    return () => unsubscribe();
+  }, [currentBookingId]);
 
-  const vehicle = settings.vehicles.find((v) => v.id === selectedVehicle);
-  const baseFare = vehicle.baseFare * 100;
-  const distanceFare = distance * vehicle.perKm * 100;
-  const totalFare = baseFare + distanceFare;
-  const commission = Math.round(totalFare * (settings.commissionPct / 100));
-  const generateOtp = () => Math.floor(1000 + Math.random() * 9000).toString();
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        const region = { latitude: current.coords.latitude, longitude: current.coords.longitude, latitudeDelta: 0.015, longitudeDelta: 0.015 };
+        setMapRegion(region);
+        regionRef.current = region;
+        setMapMarker({ latitude: region.latitude, longitude: region.longitude });
+      } catch {}
+    })();
+  }, []);
 
-  const handleBooking = async () => {
-    if (!pickupAddress.trim()) { Alert.alert('Required', 'Enter pickup address'); return; }
-    if (!dropAddress.trim()) { Alert.alert('Required', 'Enter drop address'); return; }
-    if (!itemsDescription.trim()) { Alert.alert('Required', 'Describe your items'); return; }
-
-    setLoading(true);
-    try {
-      await addDoc(collection(db, 'bookings'), {
-        customerId: user.uid,
-        customerName: profile?.name || 'Customer',
-        customerPhone: profile?.phone || '',
-        vehicleType: selectedVehicle,
-        vehicleLabel: vehicle.label,
-        pickup: { address: pickupAddress.trim() },
-        drop: { address: dropAddress.trim() },
-        itemsDescription: itemsDescription.trim(),
-        distanceKm: distance,
-        fare: { baseFare, distanceFare, totalInPaise: totalFare },
-        paymentMethod,
-        // Commission tracking: UPI = already paid, COD = driver owes company
-        commission: {
-          amountInPaise: commission,
-          pct: settings.commissionPct, // Store rate at booking time
-          status: paymentMethod === 'upi' ? 'collected' : 'pending_from_driver',
-        },
-        status: 'searching',
-        pickupOtp: generateOtp(),
-        deliveryOtp: generateOtp(),
-        createdAt: serverTimestamp(),
-      });
-
-      Alert.alert(
-        '✅ Booking Created!',
-        `Fare: ₹${totalFare / 100}\nPayment: ${paymentMethod === 'upi' ? '💳 UPI' : '💵 Cash on Delivery'}`
+  useEffect(() => {
+    if (bookingPhase === 'fare' && pickupLocation && dropLocation && mapRef.current) {
+      mapRef.current.fitToCoordinates(
+        [{ latitude: pickupLocation.lat, longitude: pickupLocation.lng }, { latitude: dropLocation.lat, longitude: dropLocation.lng }],
+        { edgePadding: { top: 80, right: 60, bottom: height * 0.55, left: 60 }, animated: true }
       );
-      setShowBookingForm(false);
-      setPickupAddress(''); setDropAddress(''); setItemsDescription('');
-      setDistance(5); setPaymentMethod('upi');
-    } catch (error) {
-      Alert.alert('Error', error.message);
+    }
+  }, [bookingPhase, pickupLocation, dropLocation]);
+
+  useEffect(() => {
+    if (bookingPhase !== 'fare' || !pickupLocation || !dropLocation || !selectedVehicle) return;
+    let cancelled = false;
+    setQuoteLoading(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        await auth.currentUser?.getIdToken(true);
+        const result = await quoteFare({
+          serviceType, vehicleType: selectedVehicle,
+          pickup: { lat: pickupLocation.lat, lng: pickupLocation.lng },
+          drop: { lat: dropLocation.lat, lng: dropLocation.lng },
+        });
+        if (!cancelled) setFareQuote(result.data);
+      } catch (error) {
+        if (!cancelled) {
+          setFareQuote(null);
+          Alert.alert("Fare Error", error.message);
+        }
+      } finally {
+        if (!cancelled) setQuoteLoading(false);
+      }
+    }, 500);
+
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [bookingPhase, dropLocation, pickupLocation, selectedVehicle, serviceType]);
+
+  const fetchPlacePredictions = async (text) => {
+    if (!text || text.trim().length < 3) return setPlaceResults([]);
+    setPlacesLoading(true);
+    try {
+      const response = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GOOGLE_API_KEY, 'X-Goog-FieldMask': 'suggestions.placePrediction.placeId,suggestions.placePrediction.text,suggestions.placePrediction.structuredFormat' },
+        body: JSON.stringify({ input: text.trim(), includedRegionCodes: ['in'], languageCode: 'en', sessionToken }),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error();
+      const predictions = (json.suggestions || []).map(item => ({
+        place_id: item.placePrediction.placeId,
+        main_text: item.placePrediction.structuredFormat?.mainText?.text || item.placePrediction.text?.text || '',
+        secondary_text: item.placePrediction.structuredFormat?.secondaryText?.text || '',
+      }));
+      setPlaceResults(predictions);
+    } catch {
+      setPlaceResults([]);
     } finally {
-      setLoading(false);
+      setPlacesLoading(false);
     }
   };
 
-  // ---- BOOKING FORM ----
-  if (showBookingForm) {
-    return (
-      <SafeAreaView style={s.container}>
-        <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity onPress={() => setShowBookingForm(false)}>
-            <Text style={s.backBtn}>← Back</Text>
+  useEffect(() => {
+    const query = placeQuery.trim();
+    if (query.length < 3 || bookingPhase === 'fare' || bookingPhase === 'active') return setPlaceResults([]);
+    const timer = setTimeout(() => fetchPlacePredictions(query), 600);
+    return () => clearTimeout(timer);
+  }, [placeQuery, bookingPhase]);
+
+  const moveMapTo = (coordinate, delta = 0.005) => {
+    setIsPinDragged(false);
+    const region = { ...coordinate, latitudeDelta: delta, longitudeDelta: delta };
+    regionRef.current = region;
+    setMapMarker(coordinate);
+    mapRef.current?.animateToRegion(region, 400);
+  };
+
+  const useCurrentLocation = async () => {
+    try {
+      setMapLoading(true);
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission denied', 'Location permission is required to use this feature.');
+        return;
+      }
+      const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const coord = { latitude: current.coords.latitude, longitude: current.coords.longitude };
+      moveMapTo(coord);
+      // Reverse geocode and prefill the search bar
+      try {
+        const places = await Location.reverseGeocodeAsync(coord);
+        const address = formatAddress(places?.[0], '');
+        if (address) setPlaceQuery(address);
+      } catch {}
+    } catch (e) {
+      Alert.alert('Error', 'Could not get current location.');
+    } finally {
+      setMapLoading(false);
+    }
+  };
+
+  const selectPlace = async (place_id) => {
+    setPlacesLoading(true);
+    try {
+      const response = await fetch(`https://places.googleapis.com/v1/places/${place_id}?sessionToken=${sessionToken}`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GOOGLE_API_KEY, 'X-Goog-FieldMask': 'formattedAddress,location' },
+      });
+      const json = await response.json();
+      setPlaceQuery(json.formattedAddress);
+      setPlaceResults([]);
+      moveMapTo({ latitude: json.location.latitude, longitude: json.location.longitude });
+    } catch (error) {
+      Alert.alert("Error", "Could not fetch place details.");
+    } finally {
+      setPlacesLoading(false);
+    }
+  };
+
+  const handleMapDragEnd = async (region) => {
+    setIsPinDragged(true);
+    setMapMarker({ latitude: region.latitude, longitude: region.longitude });
+    try {
+      const places = await Location.reverseGeocodeAsync({ latitude: region.latitude, longitude: region.longitude });
+      const address = formatAddress(places?.[0], '');
+      if (address) setPlaceQuery(address);
+    } catch (e) {}
+  };
+
+  const confirmLocation = async () => {
+    setMapLoading(true);
+    try {
+      const flatNo = manualAddress.trim();
+      let finalAddress = placeQuery;
+
+      if (!placeQuery) {
+        const places = await Location.reverseGeocodeAsync({ latitude: mapMarker.latitude, longitude: mapMarker.longitude });
+        finalAddress = formatAddress(places?.[0], `${mapMarker.latitude.toFixed(5)}, ${mapMarker.longitude.toFixed(5)}`);
+      }
+      
+      const fullAddress = flatNo ? `${flatNo}, ${finalAddress}` : finalAddress;
+      const selected = { address: fullAddress, lat: mapMarker.latitude, lng: mapMarker.longitude };
+
+      if (bookingPhase === 'pickup') {
+        setPickupLocation(selected);
+        setBookingPhase('drop');
+        setPlaceQuery('');
+        setManualAddress('');
+        setSessionToken(generateSessionToken());
+      } else if (bookingPhase === 'drop') {
+        setDropLocation(selected);
+        setBookingPhase('fare');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Could not save location');
+    } finally {
+      setMapLoading(false);
+    }
+  };
+
+  const handleCreateBooking = async () => {
+    if (serviceType === 'parcel' && !itemsDescription.trim()) return Alert.alert('Required', 'Describe your parcel items');
+    if (!fareQuote?.fare) return Alert.alert('Required', 'Please wait for fare calculation');
+
+    setActionLoading(true);
+    try {
+      const quoteCommission = fareQuote.commission || {};
+      const docRef = await addDoc(collection(db, 'bookings'), {
+        serviceType, service: serviceType,
+        customerId: user?.uid || '', customerName: profile?.name || 'Customer', customerPhone: profile?.phone || '',
+        vehicleType: selectedVehicle, vehicleLabel: selectedVehicleData.label,
+        pickup: pickupLocation, drop: dropLocation,
+        itemsDescription: serviceType === 'parcel' ? itemsDescription.trim() : '',
+        paymentMethod, distanceKm: fareQuote.distanceKm, fare: fareQuote.fare,
+        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'upi' ? 'collected' : 'pending_from_driver' },
+        status: 'searching', 
+        pickupOtp: generateOtp(), deliveryOtp: generateOtp(),
+        createdAt: serverTimestamp(),
+      });
+
+      setCurrentBookingId(docRef.id);
+      setBookingPhase('active');
+      setIsMinimized(false);
+    } catch (error) {
+      Alert.alert('Error', error.message || 'Booking failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const cancelBooking = async () => {
+    if (!currentBookingId) return;
+    setActionLoading(true);
+    try {
+      await updateDoc(doc(db, 'bookings', currentBookingId), { status: 'cancelled_by_customer' });
+      resetToHome();
+    } catch (error) {
+      Alert.alert("Error", "Could not cancel booking.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const resetToHome = () => {
+    setBookingPhase('pickup');
+    setPickupLocation(null);
+    setDropLocation(null);
+    setFareQuote(null);
+    setCurrentBookingId(null);
+    setActiveBooking(null);
+    setPlaceQuery('');
+    setManualAddress('');
+    setItemsDescription('');
+    setIsMinimized(false);
+  };
+
+  const goBack = () => {
+    if (bookingPhase === 'pickup') {
+      resetToHome();
+    } else if (bookingPhase === 'drop') {
+      setBookingPhase('pickup');
+      setDropLocation(null);
+      setPlaceQuery(pickupLocation?.address || '');
+      moveMapTo({ latitude: pickupLocation.lat, longitude: pickupLocation.lng });
+    } else if (bookingPhase === 'fare') {
+      setBookingPhase('drop');
+      setPlaceQuery(dropLocation?.address || '');
+      moveMapTo({ latitude: dropLocation.lat, longitude: dropLocation.lng });
+    }
+  };
+
+  const renderSearchPhase = () => (
+    <View style={styles.bottomSheet}>
+      {/* Floating "Use Current Location" button — sits above the sheet, moves with it */}
+      <TouchableOpacity
+        style={styles.locateBtn}
+        onPress={useCurrentLocation}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="locate" size={22} color="#111827" />
+      </TouchableOpacity>
+
+      <View style={styles.sheetHeader}>
+        {bookingPhase === 'drop' && (
+          <TouchableOpacity style={styles.backBtn} onPress={goBack}>
+            <Ionicons name="arrow-back" size={24} color="#111827" />
           </TouchableOpacity>
-          <Text style={s.formTitle}>📦 Send a Parcel</Text>
-
-          <Text style={s.label}>SELECT VEHICLE</Text>
-          <View style={s.vehicleGrid}>
-            {settings.vehicles.filter(v => v.enabled).map((v) => (
-              <TouchableOpacity key={v.id}
-                style={[s.vehicleCard, selectedVehicle === v.id && s.vehicleSelected]}
-                onPress={() => setSelectedVehicle(v.id)}>
-                <Text style={{ fontSize: 28 }}>{v.icon}</Text>
-                <Text style={s.vehicleName}>{v.label}</Text>
-                <Text style={s.vehicleCap}>{v.capacity}</Text>
-                <Text style={s.vehiclePrice}>₹{v.baseFare}+</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={s.label}>WHAT ARE YOU SENDING? *</Text>
-          <TextInput style={s.textarea} value={itemsDescription} onChangeText={setItemsDescription}
-            placeholder="e.g., Furniture, boxes, documents..." multiline numberOfLines={3} />
-
-          <Text style={s.label}>PICKUP ADDRESS *</Text>
-          <TextInput style={s.input} value={pickupAddress} onChangeText={setPickupAddress} placeholder="Enter pickup location" />
-
-          <Text style={s.label}>DROP ADDRESS *</Text>
-          <TextInput style={s.input} value={dropAddress} onChangeText={setDropAddress} placeholder="Enter drop location" />
-
-          <Text style={s.label}>DISTANCE (KM)</Text>
-          <View style={s.distRow}>
-            <TouchableOpacity style={s.distBtn} onPress={() => setDistance(Math.max(1, distance - 1))}>
-              <Text style={s.distBtnText}>−</Text>
+        )}
+        <Text style={styles.sheetTitle}>{bookingPhase === 'pickup' ? 'Where from?' : 'Where to?'}</Text>
+      </View>
+      
+      <View style={styles.searchBar}>
+        <Ionicons name={bookingPhase === 'pickup' ? 'location' : 'flag'} size={20} color={bookingPhase === 'pickup' ? '#10B981' : '#EF4444'} />
+        <TextInput
+          style={styles.searchInputArea}
+          value={placeQuery}
+          onChangeText={(text) => { setPlaceQuery(text); setIsPinDragged(false); }}
+          placeholder="Search area, street, landmark..."
+          placeholderTextColor="#9CA3AF"
+        />
+        {placesLoading ? <ActivityIndicator size="small" color="#111827" /> : 
+          placeQuery.length > 0 && (
+            <TouchableOpacity onPress={() => setPlaceQuery('')}>
+              <Ionicons name="close-circle" size={20} color="#D1D5DB" />
             </TouchableOpacity>
-            <Text style={s.distVal}>{distance} km</Text>
-            <TouchableOpacity style={s.distBtn} onPress={() => setDistance(distance + 1)}>
-              <Text style={s.distBtnText}>+</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* PAYMENT METHOD */}
-          <Text style={s.label}>PAYMENT METHOD</Text>
-          <View style={s.payRow}>
-            <TouchableOpacity style={[s.payBtn, paymentMethod === 'upi' && s.payBtnActive]} onPress={() => setPaymentMethod('upi')}>
-              <Text style={{ fontSize: 28 }}>💳</Text>
-              <Text style={[s.payLabel, paymentMethod === 'upi' && { color: '#10B981' }]}>UPI</Text>
-              <Text style={s.paySub}>Pay online</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[s.payBtn, paymentMethod === 'cod' && s.payBtnActive]} onPress={() => setPaymentMethod('cod')}>
-              <Text style={{ fontSize: 28 }}>💵</Text>
-              <Text style={[s.payLabel, paymentMethod === 'cod' && { color: '#10B981' }]}>Cash</Text>
-              <Text style={s.paySub}>Pay on delivery</Text>
-            </TouchableOpacity>
-          </View>
-
-          {paymentMethod === 'cod' && (
-            <View style={s.codNote}>
-              <Text style={s.codNoteText}>💵 Pay ₹{totalFare / 100} cash to driver at delivery</Text>
-            </View>
           )}
+      </View>
 
-          {/* FARE */}
-          <View style={s.fareBox}>
-            <FareRow label="Base Fare" value={`₹${baseFare / 100}`} />
-            <FareRow label={`Distance (${distance}km × ₹${vehicle.perKm})`} value={`₹${distanceFare / 100}`} />
-            <View style={s.divider} />
-            <FareRow label="Total" value={`₹${totalFare / 100}`} bold />
-            <FareRow label="Payment" value={paymentMethod === 'upi' ? '💳 UPI' : '💵 Cash'} highlight />
+      {placeResults.length > 0 ? (
+        <FlatList
+          data={placeResults}
+          keyExtractor={item => item.place_id}
+          keyboardShouldPersistTaps="handled"
+          style={styles.searchResultsList}
+          renderItem={({ item }) => (
+            <TouchableOpacity style={styles.searchResultRow} onPress={() => selectPlace(item.place_id)}>
+              <View style={styles.resultIconBg}>
+                <Ionicons name="location-outline" size={18} color="#6B7280" />
+              </View>
+              <View style={styles.resultTextBlock}>
+                <Text style={styles.resMain} numberOfLines={1}>{item.main_text}</Text>
+                <Text style={styles.resSub} numberOfLines={1}>{item.secondary_text}</Text>
+              </View>
+            </TouchableOpacity>
+          )}
+        />
+      ) : mapMarker ? (
+        <View style={styles.manualAddressWrapper}>
+          <TextInput
+            style={styles.manualInput}
+            value={manualAddress}
+            onChangeText={setManualAddress}
+            placeholder="House/Flat No., Building Name (Optional)"
+            placeholderTextColor="#9CA3AF"
+          />
+        </View>
+      ) : null}
+
+      <TouchableOpacity style={styles.confirmLocBtn} onPress={confirmLocation} disabled={mapLoading}>
+        {mapLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.confirmLocText}>Confirm {bookingPhase === 'pickup' ? 'Pickup' : 'Dropoff'}</Text>}
+      </TouchableOpacity>
+    </View>
+  );
+
+  const renderFarePhase = () => (
+    <View style={styles.fareSheetContainer}>
+      <View style={styles.sheetHeaderFixed}>
+        <TouchableOpacity style={styles.backBtn} onPress={goBack}>
+          <Ionicons name="arrow-back" size={24} color="#111827" />
+        </TouchableOpacity>
+        <Text style={styles.sheetTitleFixed}>Confirm Booking</Text>
+      </View>
+
+      <ScrollView style={styles.scrollableMiddle} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 16 }}>
+        <View style={styles.routeSummaryBox}>
+          <View style={styles.routeSummaryRow}>
+            <View style={styles.greenDot} />
+            <Text style={styles.routeSummaryText} numberOfLines={3}>{pickupLocation?.address}</Text>
           </View>
-
-          <TouchableOpacity style={[s.confirmBtn, loading && { opacity: 0.6 }]} onPress={handleBooking} disabled={loading}>
-            {loading ? <ActivityIndicator color="#fff" /> :
-              <Text style={s.confirmBtnText}>{paymentMethod === 'upi' ? '💳' : '💵'} Confirm — ₹{totalFare / 100}</Text>}
-          </TouchableOpacity>
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  // ---- HOME SCREEN ----
-  return (
-    <SafeAreaView style={s.container}>
-      <ScrollView contentContainerStyle={s.homeScroll}>
-        <View style={s.homeHeader}>
-          <Text style={s.greeting}>Hi {profile?.name || 'there'}! 👋</Text>
-          <Text style={s.appTitle}>LoadGo</Text>
+          <View style={styles.routeSummaryDivider} />
+          <View style={styles.routeSummaryRow}>
+            <View style={styles.redSquare} />
+            <Text style={styles.routeSummaryText} numberOfLines={3}>{dropLocation?.address}</Text>
+          </View>
         </View>
 
-        <TouchableOpacity style={s.sendBtn} onPress={() => setShowBookingForm(true)}>
-          <Text style={{ fontSize: 40, marginRight: 16 }}>📦</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={s.sendTitle}>Send a Parcel</Text>
-            <Text style={s.sendDesc}>Book a delivery now</Text>
-          </View>
-          <Text style={{ fontSize: 24, color: '#fff', fontWeight: '700' }}>→</Text>
-        </TouchableOpacity>
+        <Text style={styles.sheetTitleSmall}>Select Vehicle</Text>
+        
+        {vehicleOptions.length === 0 ? (
+          <View style={styles.emptyVehicles}><ActivityIndicator color="#111827" /><Text style={styles.emptyVehiclesText}>Loading vehicles...</Text></View>
+        ) : (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalVehicleScroll}>
+            {vehicleOptions.map(v => {
+              const active = selectedVehicle === v.id;
+              return (
+                <TouchableOpacity key={v.id} style={[styles.vehicleCardHorizontal, active && styles.vehicleCardActive]} onPress={() => setSelectedVehicle(v.id)} activeOpacity={0.8}>
+                  <View style={[styles.vehicleIconCircle, active && styles.vehicleIconCircleActive]}>
+                    <Ionicons name={vehicleIconName(v.id)} size={28} color={active ? '#111827' : '#6B7280'} />
+                  </View>
+                  <Text style={[styles.vName, active && styles.vNameActive]} numberOfLines={1}>{v.label}</Text>
+                  <Text style={styles.vCap} numberOfLines={1}>{v.capacity || 'Standard'}</Text>
+                  <Text style={[styles.vPrice, active && styles.vPriceActive]}>₹{v.baseFare}+</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
 
-        {/* ACTIVE BOOKINGS — show ALL of them */}
-        {activeBookings.length > 0 && (
-          <View>
-            <Text style={s.activeSectionTitle}>
-              🚚 Active Bookings ({activeBookings.length})
-            </Text>
-            {activeBookings.map((activeBooking) => (
-              <View key={activeBooking.id} style={[s.activeCard, { borderLeftColor: getStatusColor(activeBooking.status) }]}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <PulsingDot color={getStatusColor(activeBooking.status)} />
-                  <Text style={[s.activeStatus, { color: getStatusColor(activeBooking.status) }]}>
-                    {getStatusLabel(activeBooking.status)}
-                  </Text>
-                  <Text style={s.vehicleBadge}>{activeBooking.vehicleLabel}</Text>
-                </View>
-                {activeBooking.status === 'searching' && <FindingDriverAnimation />}
-                {activeBooking.driverName && activeBooking.status !== 'searching' && (
-                  <>
-                    <Text style={s.driverInfo}>🚗 {activeBooking.driverName}</Text>
-                    {activeBooking.driverPhone ? (
-                      <TouchableOpacity style={s.callLink} onPress={() => {
-                        const n = activeBooking.driverPhone.replace(/[^0-9+]/g, '');
-                        Linking.openURL(`tel:${n.startsWith('+') ? n : `+91${n}`}`);
-                      }}>
-                        <Text style={s.callText}>📞 Call {activeBooking.driverPhone}</Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </>
-                )}
-                <View style={s.payBadge}>
-                  <Text style={s.payBadgeText}>
-                    {activeBooking.paymentMethod === 'cod' ? '💵 Cash on Delivery' : '💳 UPI'}
-                    {' '}• ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)}
-                  </Text>
-                </View>
-                {activeBooking.status === 'at_pickup' && activeBooking.pickupOtp && (
-                  <View style={[s.otpBox, { borderColor: '#3B82F6', backgroundColor: '#EFF6FF' }]}>
-                    <Text style={[s.otpLabel, { color: '#3B82F6' }]}>🔵 PICKUP OTP — Tell driver</Text>
-                    <Text style={[s.otpCode, { color: '#3B82F6' }]}>{activeBooking.pickupOtp}</Text>
-                  </View>
-                )}
-                {activeBooking.status === 'at_drop' && activeBooking.deliveryOtp && (
-                  <View style={[s.otpBox, { borderColor: '#10B981', backgroundColor: '#ECFDF5' }]}>
-                    <Text style={[s.otpLabel, { color: '#10B981' }]}>🟢 DELIVERY OTP — Tell driver</Text>
-                    <Text style={[s.otpCode, { color: '#10B981' }]}>{activeBooking.deliveryOtp}</Text>
-                  </View>
-                )}
+        {serviceType === 'parcel' && (
+          <TextInput style={styles.packageInput} value={itemsDescription} onChangeText={setItemsDescription} placeholder="E.g. Documents, Clothes..." placeholderTextColor="#9CA3AF" />
+        )}
+
+        <View style={styles.receiptBox}>
+          {fareQuote?.fare ? (
+            <>
+              <View style={styles.receiptRow}>
+                <Text style={styles.receiptLabel}>Base Fare</Text>
+                <Text style={styles.receiptValue}>₹{Math.round((fareQuote.fare.baseFare || 0) / 100)}</Text>
               </View>
-            ))}
+              <View style={styles.receiptRow}>
+                <Text style={styles.receiptLabel}>
+                  Distance{fareQuote.distanceKm ? ` (${fareQuote.distanceKm} km)` : ''}
+                </Text>
+                <Text style={styles.receiptValue}>₹{Math.round((fareQuote.fare.distanceFare || 0) / 100)}</Text>
+              </View>
+              <View style={styles.receiptDivider} />
+              <View style={styles.receiptRow}>
+                <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+                <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>
+              </View>
+            </>
+          ) : (
+            <View style={styles.receiptRow}>
+              <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+              {quoteLoading ? <ActivityIndicator size="small" color="#111827" /> : <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>}
+            </View>
+          )}
+        </View>
+      </ScrollView>
+
+      <View style={styles.pinnedBottom}>
+        <TouchableOpacity style={[styles.actionButton, actionLoading && styles.disabledBtn]} onPress={handleCreateBooking} disabled={actionLoading || quoteLoading || vehicleOptions.length === 0}>
+          {actionLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.actionButtonText}>Confirm & Book</Text>}
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
+  const renderActiveBooking = () => {
+    if (!activeBooking) return null;
+
+    const isPostPickup = ['picked_up', 'reached', 'reached_dropoff', 'completed'].includes(activeBooking.status);
+    const isAtDropoff = ['reached', 'reached_dropoff', 'completed'].includes(activeBooking.status);
+
+    if (isMinimized) {
+      return (
+        <View style={styles.minimizedSheet}>
+          <TouchableOpacity style={styles.minimizedRow} onPress={() => setIsMinimized(false)}>
+            <View style={styles.minimizedLeft}>
+              <ActivityIndicator size="small" color="#10B981" />
+              <Text style={styles.statusText}>{getFriendlyStatus(activeBooking.status)}</Text>
+            </View>
+            <Ionicons name="chevron-up" size={24} color="#111827" />
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.bottomSheet}>
+        <View style={styles.activeHeaderRow}>
+          <View style={styles.statusHeaderExpanded}>
+            <ActivityIndicator color="#10B981" />
+            <Text style={styles.statusText}>{getFriendlyStatus(activeBooking.status)}</Text>
+          </View>
+          <TouchableOpacity onPress={() => setIsMinimized(true)} style={styles.minimizeBtn}>
+            <Ionicons name="chevron-down" size={24} color="#111827" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.otpCard}>
+          <View style={styles.otpBlock}>
+            <Text style={styles.otpLabel}>Pickup OTP</Text>
+            <Text style={[styles.otpValue, isPostPickup && { color: '#10B981' }]}>
+              {isPostPickup ? '✓' : activeBooking.pickupOtp}
+            </Text>
+          </View>
+          <View style={styles.otpDivider} />
+          <View style={styles.otpBlock}>
+            <Text style={styles.otpLabel}>Dropoff OTP</Text>
+            {isAtDropoff ? (
+              <Text style={styles.otpValue}>{activeBooking.deliveryOtp}</Text>
+            ) : (
+              <Text style={styles.otpMasked}>Wait for arrival</Text>
+            )}
+          </View>
+        </View>
+
+        {/* Driver details — shown after acceptance, hidden once trip ends */}
+        {activeBooking.driverName &&
+          !['searching', 'completed', 'cancelled', 'cancelled_by_customer'].includes(activeBooking.status) && (
+          <View style={styles.driverCard}>
+            <View style={styles.driverAvatar}>
+              <Ionicons name="person" size={22} color="#92400E" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.driverCardLabel}>YOUR DRIVER</Text>
+              <Text style={styles.driverCardName}>{activeBooking.driverName}</Text>
+              {activeBooking.driverVehicleLabel || activeBooking.driverVehicleNumber ? (
+                <Text style={styles.driverCardVehicle} numberOfLines={1}>
+                  {[activeBooking.driverVehicleLabel, activeBooking.driverVehicleNumber].filter(Boolean).join(' • ')}
+                </Text>
+              ) : null}
+            </View>
+            {activeBooking.driverPhone ? (
+              <TouchableOpacity
+                style={styles.driverCallBtn}
+                onPress={() => Linking.openURL(`tel:${activeBooking.driverPhone}`)}
+              >
+                <Ionicons name="call" size={18} color="#FFFFFF" />
+              </TouchableOpacity>
+            ) : null}
           </View>
         )}
 
-        {/* Vehicles list */}
-        <View style={s.section}>
-          <Text style={s.sectionTitle}>Available Vehicles</Text>
-          {settings.vehicles.filter(v => v.enabled).map((v) => (
-            <View key={v.id} style={s.vRow}>
-              <Text style={{ fontSize: 28 }}>{v.icon}</Text>
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={s.vName}>{v.label}</Text>
-                <Text style={s.vCap}>Up to {v.capacity}</Text>
-              </View>
-              <Text style={s.vPrice}>₹{v.baseFare}+</Text>
-            </View>
-          ))}
-        </View>
-      </ScrollView>
-    </SafeAreaView>
-  );
-}
+        {/* 👇 FIX: Cancel button disappears once status is 'picked_up' or higher */}
+        {['searching', 'accepted', 'arrived'].includes(activeBooking.status) && (
+          <TouchableOpacity style={styles.cancelBtn} onPress={cancelBooking} disabled={actionLoading}>
+            {actionLoading ? <ActivityIndicator color="#EF4444" /> : <Text style={styles.cancelBtnText}>Cancel Booking</Text>}
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  };
 
-function FareRow({ label, value, bold, highlight }) {
   return (
-    <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5 }}>
-      <Text style={{ fontSize: 13, color: '#6B7280' }}>{label}</Text>
-      <Text style={{ fontSize: bold ? 16 : 13, fontWeight: bold ? '700' : '400', color: highlight ? '#10B981' : '#1F2937' }}>
-        {value}
-      </Text>
+    <View style={styles.flex}>
+      {/* 👇 FIX: Bruteforce Map Dimensions to prevent disappearing blank screens */}
+      <MapView
+        ref={mapRef}
+        style={{ width: width, height: height, position: 'absolute', top: 0, left: 0, zIndex: -1 }}
+        mapType="standard"
+        showsUserLocation={true}
+        showsMyLocationButton={false}
+        initialRegion={mapRegion}
+        onRegionChangeComplete={(region, details) => {
+          regionRef.current = region;
+          if (bookingPhase === 'pickup' || bookingPhase === 'drop') {
+            if (details?.isGesture) handleMapDragEnd(region);
+            else setMapMarker({ latitude: region.latitude, longitude: region.longitude });
+          }
+        }}
+      >
+        {(bookingPhase === 'drop' || bookingPhase === 'fare' || bookingPhase === 'active') && pickupLocation && (
+          <Marker coordinate={{ latitude: pickupLocation.lat, longitude: pickupLocation.lng }}>
+            <View style={[styles.markerPin, { backgroundColor: '#10B981' }]}><Ionicons name="location" size={16} color="#FFF" /></View>
+          </Marker>
+        )}
+        {(bookingPhase === 'fare' || bookingPhase === 'active') && dropLocation && (
+          <Marker coordinate={{ latitude: dropLocation.lat, longitude: dropLocation.lng }}>
+            <View style={[styles.markerPin, { backgroundColor: '#EF4444' }]}><Ionicons name="flag" size={16} color="#FFF" /></View>
+          </Marker>
+        )}
+      </MapView>
+
+      {(bookingPhase === 'pickup' || bookingPhase === 'drop') && (
+        <View pointerEvents="none" style={styles.centerPinContainer}>
+          <View style={[styles.centerBalloon, { backgroundColor: bookingPhase === 'pickup' ? '#10B981' : '#EF4444' }]}>
+            <Ionicons name={bookingPhase === 'pickup' ? 'location' : 'flag'} size={24} color="#FFF" />
+          </View>
+          <View style={[styles.centerTail, { borderTopColor: bookingPhase === 'pickup' ? '#10B981' : '#EF4444' }]} />
+          <View style={styles.centerShadow} />
+        </View>
+      )}
+
+      {(bookingPhase === 'pickup' || bookingPhase === 'drop') && (
+        <SafeAreaView style={styles.topMenuContainer}>
+           <View style={styles.serviceToggleContainer}>
+            {SERVICES.map(item => {
+              const isActive = serviceType === item.id;
+              return (
+                <TouchableOpacity key={item.id} style={[styles.servicePill, isActive && styles.servicePillActive]} onPress={() => { setServiceType(item.id); resetToHome(); }}>
+                  <Text style={[styles.servicePillText, isActive && styles.servicePillTextActive]}>{item.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {bookingPhase === 'pickup' && vehicleOptions.length > 0 && (
+            <View style={styles.compactPreviewPanel}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.compactPreviewScroll}>
+                {vehicleOptions.map((v, index) => (
+                  <View key={index} style={styles.compactPreviewItem}>
+                    <Ionicons name={vehicleIconName(v.id)} size={22} color="#4B5563" />
+                    <Text style={styles.compactPreviewText}>{v.label}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          )}
+        </SafeAreaView>
+      )}
+
+      <KeyboardAvoidingView style={styles.bottomSheetWrapper} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {bookingPhase === 'pickup' || bookingPhase === 'drop' ? renderSearchPhase() : null}
+        {bookingPhase === 'fare' ? renderFarePhase() : null}
+        {bookingPhase === 'active' ? renderActiveBooking() : null}
+      </KeyboardAvoidingView>
     </View>
   );
 }
 
-const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F9FAFB' },
-  scroll: { padding: 20, paddingBottom: 40 },
-  homeScroll: { padding: 20, paddingBottom: 40 },
-  backBtn: { fontSize: 16, color: '#10B981', fontWeight: '600', marginBottom: 16 },
-  homeHeader: { marginBottom: 24 },
-  greeting: { fontSize: 16, color: '#6B7280' },
-  appTitle: { fontSize: 32, fontWeight: '800', color: '#1F2937' },
-  sendBtn: {
-    backgroundColor: '#10B981', borderRadius: 16, padding: 20, marginBottom: 20,
-    flexDirection: 'row', alignItems: 'center',
-    shadowColor: '#10B981', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 6,
-  },
-  sendTitle: { fontSize: 20, fontWeight: '700', color: '#fff' },
-  sendDesc: { fontSize: 14, color: '#D1FAE5', marginTop: 4 },
-  // Active booking
-  activeCard: {
-    backgroundColor: '#fff', borderRadius: 12, padding: 16, marginBottom: 20,
-    borderWidth: 1, borderLeftWidth: 4, borderColor: '#E5E7EB',
-  },
-  activeSectionTitle: { fontSize: 16, fontWeight: '700', color: '#1F2937', marginBottom: 10 },
-  vehicleBadge: { fontSize: 11, color: '#6B7280', backgroundColor: '#F3F4F6', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
-  activeTitle: { fontSize: 15, fontWeight: '700', color: '#1F2937', marginBottom: 8 },
-  activeStatus: { fontSize: 14, fontWeight: '700' },
-  driverInfo: { fontSize: 14, fontWeight: '600', color: '#1F2937', marginTop: 8 },
-  callLink: { backgroundColor: '#10B98115', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, marginTop: 6, alignSelf: 'flex-start' },
-  callText: { fontSize: 13, fontWeight: '600', color: '#10B981' },
-  payBadge: { backgroundColor: '#F3F4F6', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, alignSelf: 'flex-start', marginTop: 8 },
-  payBadgeText: { fontSize: 12, fontWeight: '600', color: '#4B5563' },
-  otpBox: { borderWidth: 2, borderRadius: 10, padding: 12, alignItems: 'center', marginTop: 10 },
-  otpLabel: { fontSize: 11, fontWeight: '700', marginBottom: 4 },
-  otpCode: { fontSize: 30, fontWeight: '800', letterSpacing: 8 },
-  // Section
-  section: { backgroundColor: '#fff', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: '#E5E7EB', marginBottom: 20 },
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#1F2937', marginBottom: 16 },
-  vRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#F3F4F6' },
-  vName: { fontSize: 15, fontWeight: '600', color: '#1F2937' },
-  vCap: { fontSize: 12, color: '#6B7280', marginTop: 2 },
-  vPrice: { fontSize: 16, fontWeight: '700', color: '#10B981' },
-  // Form
-  formTitle: { fontSize: 24, fontWeight: '700', color: '#1F2937', marginBottom: 20 },
-  label: { fontSize: 12, fontWeight: '700', color: '#6B7280', marginBottom: 8, marginTop: 16, letterSpacing: 0.5 },
-  vehicleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  vehicleCard: { flex: 1, minWidth: '45%', backgroundColor: '#fff', borderWidth: 2, borderColor: '#E5E7EB', borderRadius: 12, padding: 14, alignItems: 'center' },
-  vehicleSelected: { borderColor: '#10B981', backgroundColor: '#10B98115' },
-  vehicleName: { fontSize: 13, fontWeight: '600', color: '#1F2937', marginTop: 4 },
-  vehicleCap: { fontSize: 10, color: '#6B7280', marginTop: 2 },
-  vehiclePrice: { fontSize: 12, fontWeight: '700', color: '#10B981', marginTop: 4 },
-  textarea: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#E5E7EB', borderRadius: 12, padding: 12, fontSize: 14, minHeight: 70, textAlignVertical: 'top' },
-  input: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#E5E7EB', borderRadius: 12, padding: 12, fontSize: 14 },
-  distRow: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  distBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#10B981', justifyContent: 'center', alignItems: 'center' },
-  distBtnText: { color: '#fff', fontSize: 22, fontWeight: '700' },
-  distVal: { flex: 1, fontSize: 20, fontWeight: '700', textAlign: 'center', color: '#1F2937' },
-  payRow: { flexDirection: 'row', gap: 12 },
-  payBtn: { flex: 1, backgroundColor: '#fff', borderWidth: 2, borderColor: '#E5E7EB', borderRadius: 12, padding: 16, alignItems: 'center' },
-  payBtnActive: { borderColor: '#10B981', backgroundColor: '#10B98110' },
-  payLabel: { fontSize: 15, fontWeight: '700', color: '#1F2937', marginTop: 4 },
-  paySub: { fontSize: 11, color: '#6B7280', marginTop: 2 },
-  codNote: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 10, padding: 12, marginTop: 10 },
-  codNoteText: { fontSize: 13, color: '#92400E', fontWeight: '500' },
-  fareBox: { backgroundColor: '#fff', borderRadius: 12, padding: 16, marginTop: 20, borderWidth: 1, borderColor: '#E5E7EB' },
-  divider: { height: 1, backgroundColor: '#E5E7EB', marginVertical: 8 },
-  confirmBtn: { backgroundColor: '#10B981', borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 24 },
-  confirmBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+const styles = StyleSheet.create({
+  flex: { flex: 1, backgroundColor: '#F3F4F6' },
+  topMenuContainer: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 16, paddingTop: Platform.OS === 'android' ? 40 : 16 },
+  serviceToggleContainer: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderRadius: 16, padding: 4, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, elevation: 5 },
+  servicePill: { flex: 1, height: 46, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexDirection: 'row' },
+  servicePillActive: { backgroundColor: '#111827' },
+  servicePillText: { fontSize: 14, fontWeight: '700', color: '#6B7280' },
+  servicePillTextActive: { color: '#FFFFFF' },
+  compactPreviewPanel: { backgroundColor: '#FFFFFF', borderRadius: 12, marginTop: 8, paddingVertical: 10, paddingHorizontal: 12, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, elevation: 4, alignSelf: 'center', width: '100%' },
+  compactPreviewScroll: { gap: 18, alignItems: 'center' },
+  compactPreviewItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  compactPreviewText: { fontSize: 13, fontWeight: '700', color: '#4B5563' },
+  centerPinContainer: { position: 'absolute', top: '50%', left: '50%', marginLeft: -24, marginTop: -48, alignItems: 'center' },
+  centerBalloon: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 6, elevation: 6 },
+  centerTail: { width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 12, borderLeftColor: 'transparent', borderRightColor: 'transparent', marginTop: -2 },
+  centerShadow: { width: 14, height: 6, borderRadius: 7, backgroundColor: '#000', opacity: 0.15, marginTop: 4, transform: [{ scaleX: 2.5 }] },
+  locateBtn: { position: 'absolute', right: 16, top: -60, width: 46, height: 46, borderRadius: 23, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 10, zIndex: 100 },
+  markerPin: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', borderWidth: 2.5, borderColor: '#FFF', shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 4, elevation: 4 },
+  bottomSheetWrapper: { position: 'absolute', bottom: 0, left: 0, right: 0 },
+  bottomSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, maxHeight: height * 0.45, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.06, shadowRadius: 12, elevation: 16 },
+  fareSheetContainer: { height: height * 0.65, backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
+  sheetHeaderFixed: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 20, marginBottom: 16 },
+  sheetTitleFixed: { fontSize: 22, fontWeight: '800', color: '#111827' },
+  scrollableMiddle: { flex: 1, paddingHorizontal: 20 },
+  pinnedBottom: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: Platform.OS === 'ios' ? 34 : 20, borderTopWidth: 1, borderTopColor: '#F3F4F6', backgroundColor: '#FFFFFF' },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  backBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  sheetTitle: { fontSize: 18, fontWeight: '800', color: '#111827' },
+  sheetTitleSmall: { fontSize: 16, fontWeight: '800', color: '#111827', marginBottom: 12, marginTop: 8 },
+  routeSummaryBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 16, marginBottom: 18, borderWidth: 1, borderColor: '#F3F4F6' },
+  routeSummaryRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  greenDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#10B981', marginTop: 5 },
+  redSquare: { width: 10, height: 10, borderRadius: 3, backgroundColor: '#EF4444', marginTop: 5 },
+  routeSummaryText: { flex: 1, fontSize: 14, color: '#374151', fontWeight: '600' },
+  routeSummaryDivider: { height: 16, width: 2, backgroundColor: '#E5E7EB', marginLeft: 4, marginVertical: 4 },
+  searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F9FAFB', borderRadius: 12, paddingHorizontal: 14, height: 46, marginBottom: 10, borderWidth: 1, borderColor: '#F3F4F6' },
+  searchInputArea: { flex: 1, marginLeft: 12, fontSize: 16, color: '#111827', fontWeight: '500' },
+  searchResultsList: { maxHeight: 200 },
+  searchResultRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
+  resultIconBg: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  resultTextBlock: { marginLeft: 14, flex: 1 },
+  resMain: { fontSize: 15, fontWeight: '700', color: '#111827', marginBottom: 2 },
+  resSub: { fontSize: 13, color: '#6B7280' },
+  manualAddressWrapper: { marginBottom: 16 },
+  manualInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 16, padding: 16, fontSize: 15, color: '#111827' },
+  emptyVehicles: { height: 120, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F9FAFB', borderRadius: 16, marginBottom: 16 },
+  emptyVehiclesText: { color: '#6B7280', marginTop: 8, fontWeight: '600' },
+  horizontalVehicleScroll: { paddingBottom: 12, gap: 8, paddingRight: 16, paddingTop: 4 },
+  vehicleCardHorizontal: { width: 60, paddingVertical: 10, paddingHorizontal: 4, backgroundColor: '#FFFFFF', borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#F3F4F6' },
+  vehicleCardActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
+  vehicleIconCircle: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  vehicleIconCircleActive: { backgroundColor: '#E5E7EB' },
+  vName: { fontSize: 11, fontWeight: '700', color: '#4B5563', textAlign: 'center' },
+  vNameActive: { color: '#111827' },
+  vCap: { display: 'none' },
+  vPrice: { fontSize: 11, fontWeight: '800', color: '#6B7280', marginTop: 2 },
+  vPriceActive: { color: '#10B981' },
+  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 16, padding: 16, fontSize: 15, color: '#111827', marginBottom: 16 },
+  receiptBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 18, marginBottom: 16 },
+  receiptRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  receiptLabel: { fontSize: 14, color: '#6B7280', fontWeight: '500' },
+  receiptValue: { fontSize: 15, color: '#374151', fontWeight: '700' },
+  receiptDivider: { height: 1, backgroundColor: '#E5E7EB', marginVertical: 8 },
+  receiptTotalLabel: { fontSize: 15, fontWeight: '700', color: '#6B7280' },
+  receiptTotalValue: { fontSize: 26, fontWeight: '900', color: '#111827' },
+  activeHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  statusHeaderExpanded: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', padding: 16, borderRadius: 16, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  statusText: { fontSize: 15, fontWeight: '800', color: '#10B981', flexShrink: 1 },
+  minimizeBtn: { width: 48, height: 48, backgroundColor: '#F9FAFB', borderRadius: 24, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F3F4F6' },
+  otpCard: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 1, borderColor: '#F3F4F6', shadowColor: '#000', shadowOpacity: 0.03, shadowRadius: 8, elevation: 2 },
+  otpBlock: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  otpLabel: { fontSize: 12, color: '#9CA3AF', fontWeight: '700', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
+  otpValue: { fontSize: 26, color: '#111827', fontWeight: '900', letterSpacing: 3 },
+  otpMasked: { fontSize: 14, color: '#9CA3AF', fontWeight: '700', marginTop: 4 },
+  otpDivider: { width: 1, backgroundColor: '#F3F4F6', marginHorizontal: 16 },
+  minimizedSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
+  minimizedRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  minimizedLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16, flex: 1, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  actionButton: { height: 56, backgroundColor: '#111827', borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#111827', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 6 },
+  confirmLocBtn: { height: 44, backgroundColor: '#111827', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  confirmLocText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.2 },
+  disabledBtn: { backgroundColor: '#D1D5DB', shadowOpacity: 0 },
+  actionButtonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
+  cancelBtn: { height: 52, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#FEE2E2', borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  driverCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FEF3C7', borderRadius: 16, marginBottom: 12 },
+  driverAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#FDE68A', alignItems: 'center', justifyContent: 'center' },
+  driverCardLabel: { fontSize: 10, fontWeight: '800', color: '#92400E', letterSpacing: 0.5 },
+  driverCardName: { fontSize: 15, fontWeight: '700', color: '#111827', marginTop: 2 },
+  driverCardVehicle: { fontSize: 12, color: '#6B7280', marginTop: 2, fontWeight: '500' },
+  driverCallBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#10B981', alignItems: 'center', justifyContent: 'center' },
+  cancelBtnText: { color: '#EF4444', fontSize: 16, fontWeight: '800' },
 });
