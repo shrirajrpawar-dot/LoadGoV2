@@ -135,7 +135,7 @@ export default function LoginScreen({ onLogin }) {
             <View style={styles.logoCircle}>
               <Ionicons name="cube" size={36} color="#10B981" />
             </View>
-            <Text style={styles.appName}>LoadGo</Text>
+            <Text style={styles.appName}>Sarthi</Text>
             <Text style={styles.tagline}>Fast Delivery, Anywhere</Text>
           </View>
 

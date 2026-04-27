@@ -474,10 +474,9 @@ export default function CustomerHome() {
               return (
                 <TouchableOpacity key={v.id} style={[styles.vehicleCardHorizontal, active && styles.vehicleCardActive]} onPress={() => setSelectedVehicle(v.id)} activeOpacity={0.8}>
                   <View style={[styles.vehicleIconCircle, active && styles.vehicleIconCircleActive]}>
-                    <Ionicons name={vehicleIconName(v.id)} size={28} color={active ? '#111827' : '#6B7280'} />
+                    <Ionicons name={vehicleIconName(v.id)} size={18} color={active ? '#111827' : '#6B7280'} />
                   </View>
                   <Text style={[styles.vName, active && styles.vNameActive]} numberOfLines={1}>{v.label}</Text>
-                  <Text style={styles.vCap} numberOfLines={1}>{v.capacity || 'Standard'}</Text>
                   <Text style={[styles.vPrice, active && styles.vPriceActive]}>₹{v.baseFare}+</Text>
                 </TouchableOpacity>
               );
@@ -502,11 +501,48 @@ export default function CustomerHome() {
                 </Text>
                 <Text style={styles.receiptValue}>₹{Math.round((fareQuote.fare.distanceFare || 0) / 100)}</Text>
               </View>
+
+              {/* Pickup premium row — only show if there is one */}
+              {(fareQuote.fare.pickupPremium || 0) > 0 && (
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>
+                    Pickup (max)
+                  </Text>
+                  <Text style={styles.receiptValue}>
+                    +₹{Math.round((fareQuote.fare.pickupPremium || 0) / 100)}
+                  </Text>
+                </View>
+              )}
+
               <View style={styles.receiptDivider} />
-              <View style={styles.receiptRow}>
-                <Text style={styles.receiptTotalLabel}>Total Fare</Text>
-                <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>
-              </View>
+
+              {/* If we got a range from the cloud function, show "₹X–₹Y" */}
+              {fareQuote.fareRange ? (
+                <>
+                  <View style={styles.receiptRow}>
+                    <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+                    <Text style={styles.receiptTotalValue}>
+                      ₹{Math.round(fareQuote.fareRange.minInPaise / 100)}–₹{Math.round(fareQuote.fareRange.maxInPaise / 100)}
+                    </Text>
+                  </View>
+                  <Text style={styles.fareRangeNote}>Final price depends on driver distance from pickup.</Text>
+                </>
+              ) : (
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+                  <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>
+                </View>
+              )}
+
+              {/* ETA range */}
+              {fareQuote.etaRange && (
+                <View style={[styles.receiptRow, { marginTop: 8 }]}>
+                  <Text style={styles.receiptLabel}>Estimated time</Text>
+                  <Text style={styles.receiptValue}>
+                    {fareQuote.etaRange.minMinutes}–{fareQuote.etaRange.maxMinutes} min
+                  </Text>
+                </View>
+              )}
             </>
           ) : (
             <View style={styles.receiptRow}>
@@ -739,7 +775,7 @@ const styles = StyleSheet.create({
   horizontalVehicleScroll: { paddingBottom: 12, gap: 8, paddingRight: 16, paddingTop: 4 },
   vehicleCardHorizontal: { width: 60, paddingVertical: 10, paddingHorizontal: 4, backgroundColor: '#FFFFFF', borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#F3F4F6' },
   vehicleCardActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
-  vehicleIconCircle: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  vehicleIconCircle: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
   vehicleIconCircleActive: { backgroundColor: '#E5E7EB' },
   vName: { fontSize: 11, fontWeight: '700', color: '#4B5563', textAlign: 'center' },
   vNameActive: { color: '#111827' },
@@ -754,6 +790,7 @@ const styles = StyleSheet.create({
   receiptDivider: { height: 1, backgroundColor: '#E5E7EB', marginVertical: 8 },
   receiptTotalLabel: { fontSize: 15, fontWeight: '700', color: '#6B7280' },
   receiptTotalValue: { fontSize: 26, fontWeight: '900', color: '#111827' },
+  fareRangeNote: { fontSize: 11, color: '#6B7280', fontWeight: '500', marginTop: 6, fontStyle: 'italic' },
   activeHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   statusHeaderExpanded: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', padding: 16, borderRadius: 16, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
   statusText: { fontSize: 15, fontWeight: '800', color: '#10B981', flexShrink: 1 },

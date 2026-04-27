@@ -7,7 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -95,7 +95,7 @@ function buildInvoiceHTML(booking) {
   <div class="header">
     <div class="brand-block">
       <div class="brand-logo">L</div>
-      <div class="brand-name">LoadGo</div>
+      <div class="brand-name">Sarthi</div>
       <div class="brand-tag">Fast Delivery, Anywhere</div>
     </div>
     <div class="invoice-meta">
@@ -165,8 +165,8 @@ function buildInvoiceHTML(booking) {
   </div>
 
   <div class="footer">
-    <div class="thanks">Thank you for choosing LoadGo</div>
-    <div class="footnote">For support, contact us at support@loadgo.app</div>
+    <div class="thanks">Thank you for choosing Sarthi</div>
+    <div class="footnote">For support, contact us at support@sarthi.app</div>
   </div>
 </body>
 </html>
@@ -182,7 +182,7 @@ async function shareReceipt(booking) {
     if (isAvailable) {
       await Sharing.shareAsync(uri, {
         mimeType: 'application/pdf',
-        dialogTitle: `LoadGo Receipt - ${booking.id.substring(0, 8)}`,
+        dialogTitle: `Sarthi Receipt - ${booking.id.substring(0, 8)}`,
         UTI: 'com.adobe.pdf',
       });
     } else {
@@ -197,6 +197,8 @@ export default function CustomerBookingsScreen() {
   const { user } = useAuth();
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [pageSize, setPageSize] = useState(30);
+  const [hasMore, setHasMore] = useState(false);
   const prevBookingsRef = useRef({});
 
   useEffect(() => {
@@ -204,16 +206,19 @@ export default function CustomerBookingsScreen() {
 
     const q = query(
       collection(db, 'bookings'),
-      where('customerId', '==', user.uid)
+      where('customerId', '==', user.uid),
+      limit(pageSize + 1)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-      data.sort((a, b) => {
+      const all = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      all.sort((a, b) => {
         const ta = a.createdAt?.toMillis?.() || 0;
         const tb = b.createdAt?.toMillis?.() || 0;
         return tb - ta;
       });
+      setHasMore(all.length > pageSize);
+      const data = all.slice(0, pageSize);
 
       // Check for new driver accepted notifications
       data.forEach((booking) => {
@@ -238,7 +243,7 @@ export default function CustomerBookingsScreen() {
     });
 
     return () => unsubscribe();
-  }, [user?.uid]);
+  }, [user?.uid, pageSize]);
 
   if (loading) {
     return (
@@ -277,7 +282,9 @@ export default function CustomerBookingsScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>My Bookings</Text>
-        <Text style={styles.subtitle}>{bookings.length} total</Text>
+        <Text style={styles.subtitle}>
+          {hasMore ? `Showing ${bookings.length}` : `${bookings.length} total`}
+        </Text>
       </View>
       <SectionList
         sections={sections}
@@ -288,6 +295,15 @@ export default function CustomerBookingsScreen() {
         )}
         renderItem={({ item }) => <BookingCard booking={item} />}
         stickySectionHeadersEnabled={false}
+        ListFooterComponent={hasMore ? (
+          <TouchableOpacity
+            style={styles.loadMoreBtn}
+            onPress={() => setPageSize(pageSize + 30)}
+          >
+            <Ionicons name="chevron-down" size={16} color="#374151" />
+            <Text style={styles.loadMoreText}>Load More</Text>
+          </TouchableOpacity>
+        ) : null}
       />
     </SafeAreaView>
   );
@@ -474,4 +490,6 @@ const styles = StyleSheet.create({
 
   shareReceiptBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 10, paddingVertical: 12, backgroundColor: '#EFF6FF', borderRadius: 12, borderWidth: 1, borderColor: '#DBEAFE' },
   shareReceiptText: { fontSize: 14, fontWeight: '700', color: '#3B82F6' },
+  loadMoreBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 14, marginTop: 4, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#F3F4F6' },
+  loadMoreText: { fontSize: 13, color: '#374151', fontWeight: '700' },
 });

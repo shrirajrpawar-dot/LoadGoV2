@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -13,31 +13,43 @@ export default function DriverEarnings() {
   const [completedBookings, setCompletedBookings] = useState([]);
   const [pendingCodCommission, setPendingCodCommission] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [pageSize, setPageSize] = useState(30);
+  const [hasMore, setHasMore] = useState(false);
 
   const todayPaise = driverDoc?.earnings?.todayInPaise || 0;
   const totalPaise = driverDoc?.earnings?.totalInPaise || 0;
 
   useEffect(() => {
     if (!user?.uid) { setLoading(false); return; }
-    const q = query(
+
+    // Paged completed bookings — only what we need to render
+    const qPaged = query(
       collection(db, 'bookings'),
       where('driverId', '==', user.uid),
-      where('status', '==', 'completed')
+      where('status', '==', 'completed'),
+      limit(pageSize + 1) // one extra so we know if there's more
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      data.sort((a, b) => (b.completedAt?.toMillis?.() || 0) - (a.completedAt?.toMillis?.() || 0));
-      setCompletedBookings(data);
-
-      // Calculate pending COD commission
-      const pending = data
-        .filter((b) => b.paymentMethod === 'cod' && b.commission?.status === 'pending_from_driver')
-        .reduce((sum, b) => sum + (b.commission?.amountInPaise || 0), 0);
-      setPendingCodCommission(pending);
+    const unsubPaged = onSnapshot(qPaged, (snap) => {
+      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      all.sort((a, b) => (b.completedAt?.toMillis?.() || 0) - (a.completedAt?.toMillis?.() || 0));
+      setHasMore(all.length > pageSize);
+      setCompletedBookings(all.slice(0, pageSize));
       setLoading(false);
     });
-    return () => unsub();
-  }, [user?.uid]);
+
+    // Pending COD commission — narrow query so it stays cheap even with thousands of trips
+    const qPending = query(
+      collection(db, 'bookings'),
+      where('driverId', '==', user.uid),
+      where('commission.status', '==', 'pending_from_driver')
+    );
+    const unsubPending = onSnapshot(qPending, (snap) => {
+      const total = snap.docs.reduce((sum, d) => sum + (d.data().commission?.amountInPaise || 0), 0);
+      setPendingCodCommission(total);
+    });
+
+    return () => { unsubPaged(); unsubPending(); };
+  }, [user?.uid, pageSize]);
 
   if (loading) {
     return (
@@ -80,19 +92,19 @@ export default function DriverEarnings() {
               </View>
             </View>
             <Text style={s.codDesc}>
-              You collected this in cash from customers. Please transfer this to LoadGo UPI:
+              You collected this in cash from customers. Please transfer this to Sarthi UPI:
             </Text>
             <View style={s.upiBox}>
-              <Text style={s.upiLabel}>LoadGo UPI ID</Text>
-              <Text style={s.upiId}>loadgo@upi</Text>
+              <Text style={s.upiLabel}>Sarthi UPI ID</Text>
+              <Text style={s.upiId}>sarthi@upi</Text>
             </View>
             <TouchableOpacity
               style={s.payNowBtn}
               onPress={() => {
                 const amount = (pendingCodCommission / 100).toFixed(2);
-                const upiUrl = `upi://pay?pa=loadgo@upi&pn=LoadGo&am=${amount}&cu=INR&tn=LoadGo%20Commission`;
+                const upiUrl = `upi://pay?pa=sarthi@upi&pn=Sarthi&am=${amount}&cu=INR&tn=Sarthi%20Commission`;
                 Linking.openURL(upiUrl).catch(() => {
-                  Alert.alert('UPI Not Found', 'Please pay manually to: loadgo@upi\nAmount: ₹' + amount);
+                  Alert.alert('UPI Not Found', 'Please pay manually to: sarthi@upi\nAmount: ₹' + amount);
                 });
               }}
             >
@@ -115,7 +127,9 @@ export default function DriverEarnings() {
         {completedBookings.length > 0 && (
           <View style={s.historySection}>
             <Text style={s.historyTitle}>Lifetime Bookings</Text>
-            <Text style={s.historySubtitle}>{completedBookings.length} completed deliveries</Text>
+            <Text style={s.historySubtitle}>
+              {hasMore ? `Showing ${completedBookings.length}` : `${completedBookings.length} completed deliveries`}
+            </Text>
 
             {completedBookings.map((b) => {
               const totalFare = (b.fare?.totalInPaise || 0) / 100;
@@ -172,6 +186,16 @@ export default function DriverEarnings() {
                 </View>
               );
             })}
+
+            {hasMore && (
+              <TouchableOpacity
+                style={s.loadMoreBtn}
+                onPress={() => setPageSize(pageSize + 30)}
+              >
+                <Ionicons name="chevron-down" size={16} color="#374151" />
+                <Text style={s.loadMoreText}>Load More</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
       </ScrollView>
@@ -254,7 +278,7 @@ function buildDriverReceiptHTML(b, driverName) {
   <div class="header">
     <div>
       <div class="brand-logo">L</div>
-      <div class="brand-name">LoadGo</div>
+      <div class="brand-name">Sarthi</div>
       <div class="brand-tag">Driver Earnings Receipt</div>
     </div>
     <div class="invoice-meta">
@@ -340,7 +364,7 @@ function buildDriverReceiptHTML(b, driverName) {
   </div>
 
   <div class="footer">
-    <div class="thanks">Thank you for delivering with LoadGo</div>
+    <div class="thanks">Thank you for delivering with Sarthi</div>
     <div class="footnote">Generated on ${escape(new Date().toLocaleString())}</div>
   </div>
 </body>
@@ -450,4 +474,6 @@ const s = StyleSheet.create({
   historyPayText: { fontSize: 11, fontWeight: '700', color: '#1F2937' },
   receiptBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#DBEAFE' },
   receiptBtnText: { fontSize: 12, fontWeight: '700', color: '#3B82F6' },
+  loadMoreBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 12, marginTop: 4, backgroundColor: '#FFFFFF', borderRadius: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  loadMoreText: { fontSize: 13, color: '#374151', fontWeight: '700' },
 });

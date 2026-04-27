@@ -9,11 +9,12 @@ import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  collection, query, where, onSnapshot,
+  collection, query, where, onSnapshot, limit,
   doc, updateDoc, getDoc, serverTimestamp, arrayUnion, addDoc,
 } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useAppSettings } from '../../hooks/useAppSettings';
 
 const { width, height } = Dimensions.get('window');
 
@@ -30,6 +31,7 @@ const VLABELS = {
 
 export default function DriverHome() {
   const { user, profile, driverDoc } = useAuth();
+  const { settings } = useAppSettings();
   const mapRef = useRef(null);
   
   const [isOnline, setIsOnline] = useState(false);
@@ -39,19 +41,56 @@ export default function DriverHome() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
+  const [driverLocation, setDriverLocation] = useState(null); // {lat, lng}
 
   // KYC status check
   const kycStatus = driverDoc?.kyc?.status || 'not_started';
   const isKycApproved = kycStatus === 'approved' || kycStatus === 'verified';
 
-  const currentBooking = myBookings.find(b => 
-    ['accepted', 'arrived', 'picked_up', 'reached_dropoff'].includes(b.status)
-  ) || null;
+  // Active states the driver still cares about (current trip)
+  const ACTIVE_STATES = ['accepted', 'arrived', 'picked_up', 'reached_dropoff'];
 
-  const availableBookings = allSearching.filter(b => 
-    b.vehicleType === driverDoc?.vehicle?.type && 
-    !(b.rejectedByDrivers || []).includes(user?.uid)
-  );
+  const currentBooking = myBookings.find(b => ACTIVE_STATES.includes(b.status)) || null;
+
+  // Haversine — straight-line distance in km
+  const haversineKm = (lat1, lng1, lat2, lng2) => {
+    if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
+    const R = 6371; // Earth radius in km
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  // Lookup vehicle config from settings (across both lists)
+  const findVehicleConfig = (vehicleId) => {
+    return (settings.parcelVehicles || []).find(v => v.id === vehicleId)
+        || (settings.rideVehicles || []).find(v => v.id === vehicleId)
+        || null;
+  };
+
+  // Decorate each available booking with distanceKm + driver pickup premium
+  const availableBookings = allSearching
+    .filter(b => !(b.rejectedByDrivers || []).includes(user?.uid))
+    .map(b => {
+      const dKm = (driverLocation && b.pickup?.lat)
+        ? haversineKm(driverLocation.lat, driverLocation.lng, b.pickup.lat, b.pickup.lng)
+        : null;
+      const vCfg = findVehicleConfig(b.vehicleType);
+      const freeKm = Number(vCfg?.pickupFreeKm) || 2;
+      const rate = Number(vCfg?.pickupKmRate) || 0;
+      const premium = (dKm != null) ? Math.round(Math.max(0, dKm - freeKm) * rate) : null;
+      return { ...b, _distanceKm: dKm, _pickupPremium: premium };
+    })
+    .sort((a, b) => {
+      // Nearest first; bookings without distance go to the end
+      if (a._distanceKm == null && b._distanceKm == null) return 0;
+      if (a._distanceKm == null) return 1;
+      if (b._distanceKm == null) return -1;
+      return a._distanceKm - b._distanceKm;
+    });
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -60,17 +99,76 @@ export default function DriverHome() {
       if (snap.exists()) setIsOnline(snap.data().status === 'online');
     });
 
-    const unsubSearching = onSnapshot(query(collection(db, 'bookings'), where('status', '==', 'searching')), snap => {
-      setAllSearching(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    // Only run searching listener when driver is online AND has a vehicle type set.
+    // No vehicle type? skip — we'd download every searching booking otherwise.
+    let unsubSearching = () => {};
+    const myVehicleType = driverDoc?.vehicle?.type;
+    if (isOnline && myVehicleType) {
+      unsubSearching = onSnapshot(
+        query(
+          collection(db, 'bookings'),
+          where('status', '==', 'searching'),
+          where('vehicleType', '==', myVehicleType),
+          limit(20),
+        ),
+        snap => {
+          setAllSearching(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setLoading(false);
+        }
+      );
+    } else {
+      // Driver offline / no vehicle — clear list, don't subscribe
+      setAllSearching([]);
       setLoading(false);
-    });
+    }
 
-    const unsubMine = onSnapshot(query(collection(db, 'bookings'), where('driverId', '==', user.uid)), snap => {
-      setMyBookings(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    // Only watch the driver's own bookings that are still in flight.
+    // Past completed/cancelled bookings don't need a live listener — they live on the Earnings page.
+    const unsubMine = onSnapshot(
+      query(
+        collection(db, 'bookings'),
+        where('driverId', '==', user.uid),
+        where('status', 'in', [...ACTIVE_STATES, 'completed']),
+        limit(5),
+      ),
+      snap => {
+        setMyBookings(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }
+    );
 
     return () => { unsubDriver(); unsubSearching(); unsubMine(); };
-  }, [user?.uid]);
+  }, [user?.uid, isOnline, driverDoc?.vehicle?.type]);
+
+  // Live driver location: update Firestore every 30s while online (and not on a trip)
+  useEffect(() => {
+    if (!user?.uid || !isOnline) return;
+
+    let cancelled = false;
+
+    const updateLocationOnce = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (cancelled) return;
+        const coord = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setDriverLocation(coord);
+        await updateDoc(doc(db, 'drivers', user.uid), {
+          location: { ...coord, updatedAt: serverTimestamp() },
+        });
+      } catch (e) {
+        // silently ignore — driver might've revoked permission
+      }
+    };
+
+    updateLocationOnce(); // immediate
+    const interval = setInterval(updateLocationOnce, 30000); // every 30s
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.uid, isOnline]);
 
   useEffect(() => {
     const target = currentBooking || availableBookings[focusedIndex];
@@ -349,7 +447,9 @@ export default function DriverHome() {
                 onScroll={e => setFocusedIndex(Math.round(e.nativeEvent.contentOffset.x / width))} 
                 keyExtractor={(item) => item.id}
                 renderItem={({item}) => {
-                  const distanceKm = item.distanceKm ? Number(item.distanceKm).toFixed(1) : null;
+                  const tripKm = item.distanceKm ? Number(item.distanceKm).toFixed(1) : null;
+                  const pickupKm = item._distanceKm != null ? item._distanceKm.toFixed(1) : null;
+                  const pickupPremium = item._pickupPremium;
                   const isCod = item.paymentMethod === 'cod';
                   return (
                     <View style={s.card}>
@@ -365,8 +465,24 @@ export default function DriverHome() {
 
                       <View style={s.metaRow}>
                         <Text style={s.metaText}>👤 {item.customerName || 'Customer'}</Text>
-                        {distanceKm && <Text style={s.metaText}>📏 {distanceKm} km</Text>}
+                        {tripKm && <Text style={s.metaText}>🛣️ Trip {tripKm} km</Text>}
                       </View>
+
+                      {/* Driver-to-pickup distance + pickup premium they'd earn */}
+                      {pickupKm != null && (
+                        <View style={s.pickupInfoRow}>
+                          <View style={s.pickupChip}>
+                            <Ionicons name="navigate-outline" size={13} color="#1E40AF" />
+                            <Text style={s.pickupChipText}>{pickupKm} km to pickup</Text>
+                          </View>
+                          {pickupPremium > 0 && (
+                            <View style={[s.pickupChip, { backgroundColor: '#ECFDF5' }]}>
+                              <Ionicons name="cash-outline" size={13} color="#065F46" />
+                              <Text style={[s.pickupChipText, { color: '#065F46' }]}>+₹{pickupPremium} pickup</Text>
+                            </View>
+                          )}
+                        </View>
+                      )}
 
                       <View style={s.addressBlock}>
                         <View style={s.addressRow}>
@@ -477,6 +593,9 @@ const s = StyleSheet.create({
   payTagText: { fontSize: 12, fontWeight: '700', color: '#1F2937' },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, marginBottom: 10 },
   metaText: { fontSize: 13, color: '#4B5563', fontWeight: '600' },
+  pickupInfoRow: { flexDirection: 'row', gap: 8, marginBottom: 10, flexWrap: 'wrap' },
+  pickupChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#EFF6FF', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  pickupChipText: { fontSize: 12, fontWeight: '700', color: '#1E40AF' },
   addressBlock: { backgroundColor: '#F9FAFB', borderRadius: 12, padding: 12, marginBottom: 10 },
   addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   greenDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#10B981', marginTop: 5 },
