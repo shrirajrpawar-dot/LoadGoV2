@@ -81,7 +81,7 @@ export default function DriverHome() {
       const vCfg = findVehicleConfig(b.vehicleType);
       const freeKm = Number(vCfg?.pickupFreeKm) || 2;
       const rate = Number(vCfg?.pickupKmRate) || 0;
-      const premium = (dKm != null) ? Math.round(Math.max(0, dKm - freeKm) * rate) : null;
+      const premium = (dKm != null) ? Math.round(Math.max(0, Math.min(dKm, Number(settings.searchRadiusKm) || 5) - freeKm) * rate) : null;
       return { ...b, _distanceKm: dKm, _pickupPremium: premium };
     })
     .sort((a, b) => {
@@ -451,11 +451,16 @@ export default function DriverHome() {
                   const pickupKm = item._distanceKm != null ? item._distanceKm.toFixed(1) : null;
                   const pickupPremium = item._pickupPremium;
                   const isCod = item.paymentMethod === 'cod';
+                  // Driver's actual fare = base + distance + THEIR pickup premium (not customer's max)
+                  const baseFare = (item.fare?.baseFare || 0) / 100;
+                  const distanceFare = (item.fare?.distanceFare || 0) / 100;
+                  const driverPremium = item._pickupPremium || 0;
+                  const actualFare = Math.round(baseFare + distanceFare + driverPremium);
                   return (
                     <View style={s.card}>
                       <View style={s.cardTopRow}>
                         <View style={{ flex: 1 }}>
-                          <Text style={s.price}>₹{Math.round((item.fare?.totalInPaise || 0)/100)}</Text>
+                          <Text style={s.price}>₹{actualFare}</Text>
                           <Text style={s.reqTitle}>{VLABELS[item.vehicleType] || 'Delivery Request'}</Text>
                         </View>
                         <View style={[s.payTag, isCod ? s.payTagCod : s.payTagUpi]}>

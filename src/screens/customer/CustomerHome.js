@@ -165,7 +165,8 @@ export default function CustomerHome() {
       } catch (error) {
         if (!cancelled) {
           setFareQuote(null);
-          Alert.alert("Fare Error", error.message);
+          // Don't pop up alert on auto-quote — log silently. User sees inline error in the fare card.
+          console.warn('Fare quote failed:', error.message);
         }
       } finally {
         if (!cancelled) setQuoteLoading(false);
@@ -463,29 +464,37 @@ export default function CustomerHome() {
           </View>
         </View>
 
+        {serviceType === 'parcel' && (
+          <TextInput style={styles.packageInput} value={itemsDescription} onChangeText={setItemsDescription} placeholder="What are you sending? E.g. Documents, Clothes..." placeholderTextColor="#9CA3AF" />
+        )}
+
         <Text style={styles.sheetTitleSmall}>Select Vehicle</Text>
-        
+
         {vehicleOptions.length === 0 ? (
           <View style={styles.emptyVehicles}><ActivityIndicator color="#111827" /><Text style={styles.emptyVehiclesText}>Loading vehicles...</Text></View>
         ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalVehicleScroll}>
+          <View style={styles.vehicleList}>
             {vehicleOptions.map(v => {
               const active = selectedVehicle === v.id;
               return (
-                <TouchableOpacity key={v.id} style={[styles.vehicleCardHorizontal, active && styles.vehicleCardActive]} onPress={() => setSelectedVehicle(v.id)} activeOpacity={0.8}>
-                  <View style={[styles.vehicleIconCircle, active && styles.vehicleIconCircleActive]}>
-                    <Ionicons name={vehicleIconName(v.id)} size={18} color={active ? '#111827' : '#6B7280'} />
+                <TouchableOpacity
+                  key={v.id}
+                  style={[styles.vehicleListRow, active && styles.vehicleListRowActive]}
+                  onPress={() => setSelectedVehicle(v.id)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.vehicleListIcon, active && styles.vehicleListIconActive]}>
+                    <Ionicons name={vehicleIconName(v.id)} size={16} color={active ? '#111827' : '#6B7280'} />
                   </View>
-                  <Text style={[styles.vName, active && styles.vNameActive]} numberOfLines={1}>{v.label}</Text>
-                  <Text style={[styles.vPrice, active && styles.vPriceActive]}>₹{v.baseFare}+</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.vehicleListName, active && styles.vehicleListNameActive]} numberOfLines={1}>{v.label}</Text>
+                    {v.capacity ? <Text style={styles.vehicleListCap} numberOfLines={1}>{v.capacity}</Text> : null}
+                  </View>
+                  <Text style={[styles.vehicleListPrice, active && styles.vehicleListPriceActive]}>₹{v.baseFare}+</Text>
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
-        )}
-
-        {serviceType === 'parcel' && (
-          <TextInput style={styles.packageInput} value={itemsDescription} onChangeText={setItemsDescription} placeholder="E.g. Documents, Clothes..." placeholderTextColor="#9CA3AF" />
+          </View>
         )}
 
         <View style={styles.receiptBox}>
@@ -534,12 +543,14 @@ export default function CustomerHome() {
                 </View>
               )}
 
-              {/* ETA range */}
-              {fareQuote.etaRange && (
+              {/* Pickup ETA */}
+              {(fareQuote.pickupEtaRange || fareQuote.etaRange) && (
                 <View style={[styles.receiptRow, { marginTop: 8 }]}>
-                  <Text style={styles.receiptLabel}>Estimated time</Text>
+                  <Text style={styles.receiptLabel}>Pickup in</Text>
                   <Text style={styles.receiptValue}>
-                    {fareQuote.etaRange.minMinutes}–{fareQuote.etaRange.maxMinutes} min
+                    {fareQuote.pickupEtaRange
+                      ? `${fareQuote.pickupEtaRange.minMinutes}–${fareQuote.pickupEtaRange.maxMinutes} min`
+                      : `${fareQuote.etaRange.minMinutes}–${fareQuote.etaRange.maxMinutes} min`}
                   </Text>
                 </View>
               )}
@@ -782,7 +793,19 @@ const styles = StyleSheet.create({
   vCap: { display: 'none' },
   vPrice: { fontSize: 11, fontWeight: '800', color: '#6B7280', marginTop: 2 },
   vPriceActive: { color: '#10B981' },
-  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 16, padding: 16, fontSize: 15, color: '#111827', marginBottom: 16 },
+  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 13, color: '#111827', marginBottom: 12 },
+
+  // Vertical list rows
+  vehicleList: { gap: 6, marginBottom: 12 },
+  vehicleListRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 12 },
+  vehicleListRowActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
+  vehicleListIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  vehicleListIconActive: { backgroundColor: '#E5E7EB' },
+  vehicleListName: { fontSize: 13, fontWeight: '700', color: '#374151' },
+  vehicleListNameActive: { color: '#111827' },
+  vehicleListCap: { fontSize: 11, color: '#9CA3AF', fontWeight: '500', marginTop: 1 },
+  vehicleListPrice: { fontSize: 13, fontWeight: '800', color: '#6B7280' },
+  vehicleListPriceActive: { color: '#10B981' },
   receiptBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 18, marginBottom: 16 },
   receiptRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   receiptLabel: { fontSize: 14, color: '#6B7280', fontWeight: '500' },
@@ -804,11 +827,11 @@ const styles = StyleSheet.create({
   minimizedSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
   minimizedRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   minimizedLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16, flex: 1, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
-  actionButton: { height: 56, backgroundColor: '#111827', borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#111827', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 6 },
+  actionButton: { height: 46, backgroundColor: '#10B981', borderRadius: 12, alignItems: 'center', justifyContent: 'center', shadowColor: '#10B981', shadowOpacity: 0.2, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
   confirmLocBtn: { height: 44, backgroundColor: '#111827', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   confirmLocText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.2 },
   disabledBtn: { backgroundColor: '#D1D5DB', shadowOpacity: 0 },
-  actionButtonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
+  actionButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
   cancelBtn: { height: 52, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#FEE2E2', borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   driverCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FEF3C7', borderRadius: 16, marginBottom: 12 },
   driverAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#FDE68A', alignItems: 'center', justifyContent: 'center' },

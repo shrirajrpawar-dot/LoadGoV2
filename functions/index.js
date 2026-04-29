@@ -72,8 +72,8 @@ exports.quoteFare = onCall({ region: 'asia-south1' }, async (request) => {
   // 5. Final fare with worst-case premium
   const totalInPaise = (tripFare + maxPickupPremium) * 100;
 
-  // 6. Commission
-  const commissionPct = Number(settings.commissionPct) || 20;
+  // 6. Commission (per-vehicle, falls back to global)
+  const commissionPct = Number(vehicle.commission) || Number(settings.commissionPct) || 20;
   const commissionAmount = Math.round(totalInPaise * commissionPct / 100);
 
   return {
@@ -95,6 +95,12 @@ exports.quoteFare = onCall({ region: 'asia-south1' }, async (request) => {
     etaRange: {
       minMinutes: Math.max(2, Math.round((distanceKm / 25) * 60)),
       maxMinutes: Math.max(5, Math.round(((distanceKm + searchRadiusKm) / 25) * 60)),
+    },
+    // Pickup ETA — just driver→pickup time (assumes 25 km/h)
+    // Min: driver right at pickup (1 min minimum). Max: driver at edge of radius
+    pickupEtaRange: {
+      minMinutes: 2,
+      maxMinutes: Math.max(5, Math.round((searchRadiusKm / 25) * 60)),
     },
     // Helpful for admin/debug
     pickupConfig: {
