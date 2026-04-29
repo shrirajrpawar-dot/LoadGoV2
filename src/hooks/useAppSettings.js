@@ -22,6 +22,12 @@ const DEFAULT_RIDE_VEHICLES = [
   { id: '7seater',    label: '7 Seater',          icon: '🚐', baseFare: 150, perKm: 30, capacity: '7 Pax', commission: 30, pickupFreeKm: 2, pickupKmRate: 18, enabled: true, service: 'ride' },
 ];
 
+const DEFAULT_PAYMENT_METHODS = {
+  cod:         { enabled: true,  label: 'Cash on Delivery' },
+  upi_direct:  { enabled: true,  label: 'Pay Driver via UPI' },
+  razorpay:    { enabled: false, label: 'Pay via Razorpay' },
+};
+
 export const useAppSettings = () => {
   const [settings, setSettings] = useState({
     parcelVehicles: DEFAULT_PARCEL_VEHICLES,
@@ -29,15 +35,15 @@ export const useAppSettings = () => {
     commissionPct: 20,
     upiId: 'sarthi@upi',
     appName: 'Sarthi',
-    searchRadiusKm: 5, // worst-case driver distance for premium quote
+    searchRadiusKm: 5,
+    paymentMethods: DEFAULT_PAYMENT_METHODS,
+    razorpayKeyId: '',
   });
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'settings', 'app'), (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        // Merge defaults so new fields (pickupFreeKm/pickupKmRate) get backfilled
-        // when admin's saved doc doesn't yet contain them
         const mergeVehicleDefaults = (saved, defaults) =>
           (saved || defaults).map((v) => {
             const def = defaults.find((d) => d.id === v.id) || {};
@@ -55,6 +61,9 @@ export const useAppSettings = () => {
           upiId: data.upiId || 'sarthi@upi',
           appName: data.appName || 'Sarthi',
           searchRadiusKm: data.searchRadiusKm || 5,
+          // Merge payment methods with defaults so a method missing from Firestore stays disabled
+          paymentMethods: { ...DEFAULT_PAYMENT_METHODS, ...(data.paymentMethods || {}) },
+          razorpayKeyId: data.razorpayKeyId || '',
         });
       } else {
         setSettings({
@@ -64,6 +73,8 @@ export const useAppSettings = () => {
           upiId: 'sarthi@upi',
           appName: 'Sarthi',
           searchRadiusKm: 5,
+          paymentMethods: DEFAULT_PAYMENT_METHODS,
+          razorpayKeyId: '',
         });
       }
     });

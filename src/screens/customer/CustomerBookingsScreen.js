@@ -10,6 +10,10 @@ import * as Sharing from 'expo-sharing';
 import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useAppSettings } from '../../hooks/useAppSettings';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../../../firebase';
+import { doc, updateDoc } from 'firebase/firestore';
 
 const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'in_progress', 'at_drop'];
 
@@ -195,6 +199,7 @@ async function shareReceipt(booking) {
 
 export default function CustomerBookingsScreen() {
   const { user } = useAuth();
+  const { settings } = useAppSettings();
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [pageSize, setPageSize] = useState(30);
@@ -293,7 +298,7 @@ export default function CustomerBookingsScreen() {
         renderSectionHeader={({ section }) => (
           <Text style={styles.sectionHeader}>{section.title}</Text>
         )}
-        renderItem={({ item }) => <BookingCard booking={item} />}
+        renderItem={({ item }) => <BookingCard booking={item} settings={settings} />}
         stickySectionHeadersEnabled={false}
         ListFooterComponent={hasMore ? (
           <TouchableOpacity
@@ -309,7 +314,72 @@ export default function CustomerBookingsScreen() {
   );
 }
 
-function BookingCard({ booking }) {
+function BookingCard({ booking, settings }) {
+  const [paying, setPaying] = useState(false);
+
+  const handleUpiDirectPay = async () => {
+    const driverUpi = booking.driverUpiId;
+    if (!driverUpi) {
+      Alert.alert('UPI not available', 'Driver has not set up their UPI ID. Please pay in cash.');
+      return;
+    }
+    const amount = Math.round((booking.fare?.totalInPaise || 0) / 100);
+    const driverName = encodeURIComponent(booking.driverName || 'Driver');
+    const note = encodeURIComponent(`Sarthi-${booking.id.slice(0, 8)}`);
+    const upiUrl = `upi://pay?pa=${driverUpi}&pn=${driverName}&am=${amount}&cu=INR&tn=${note}`;
+    try {
+      const supported = await Linking.canOpenURL(upiUrl);
+      if (!supported) {
+        Alert.alert('No UPI App', `No UPI app installed. Pay manually to ${driverUpi}, amount ₹${amount}`);
+        return;
+      }
+      await Linking.openURL(upiUrl);
+      // After returning to the app, prompt customer to confirm
+      setTimeout(() => {
+        Alert.alert(
+          'Did you complete the payment?',
+          'Please confirm only after payment is successful in your UPI app.',
+          [
+            { text: 'Not yet', style: 'cancel' },
+            {
+              text: 'Yes, paid',
+              onPress: async () => {
+                try {
+                  await updateDoc(doc(db, 'bookings', booking.id), {
+                    paymentStatus: 'customer_paid',
+                    customerPaidAt: new Date().toISOString(),
+                  });
+                } catch (e) {
+                  Alert.alert('Error', 'Could not mark as paid: ' + e.message);
+                }
+              },
+            },
+          ]
+        );
+      }, 800);
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
+  const handleRazorpayPay = async () => {
+    setPaying(true);
+    try {
+      const createOrder = httpsCallable(functions, 'createRazorpayOrder');
+      const result = await createOrder({ bookingId: booking.id });
+      const { orderId, amount, keyId } = result.data;
+      // PLACEHOLDER: actual Razorpay checkout via WebView/SDK goes here
+      Alert.alert(
+        'Razorpay Coming Soon',
+        `Order created (ID: ${orderId}). Real Razorpay checkout requires the react-native-razorpay package or WebView integration. Once added, this will open the Razorpay payment page with amount ₹${amount / 100}.`
+      );
+    } catch (e) {
+      Alert.alert('Razorpay Error', e.message || 'Could not create order. Make sure Razorpay is configured in admin settings and Firebase Functions config.');
+    } finally {
+      setPaying(false);
+    }
+  };
+
   const getStatusInfo = () => {
     if (isBookingExpired(booking)) {
       return { color: '#EF4444', label: 'Expired (No Driver Found)', icon: 'time-outline' };
@@ -392,6 +462,44 @@ function BookingCard({ booking }) {
               <Text style={styles.callBtnText}>Call {booking.driverPhone}</Text>
             </TouchableOpacity>
           ) : null}
+
+          {/* Payment Action — UPI direct or Razorpay, while booking is active */}
+          {ACTIVE_STATUSES.includes(booking.status) &&
+           booking.status !== 'searching' &&
+           booking.paymentStatus !== 'customer_paid' &&
+           booking.paymentStatus !== 'driver_confirmed' &&
+           (booking.paymentMethod === 'upi_direct' || booking.paymentMethod === 'upi') && (
+            <TouchableOpacity style={styles.payBtn} onPress={handleUpiDirectPay}>
+              <Ionicons name="card-outline" size={16} color="#FFF" />
+              <Text style={styles.payBtnText}>
+                Pay ₹{Math.round((booking.fare?.totalInPaise || 0) / 100)} via UPI
+              </Text>
+            </TouchableOpacity>
+          )}
+          {ACTIVE_STATUSES.includes(booking.status) &&
+           booking.paymentMethod === 'razorpay' &&
+           booking.paymentStatus !== 'driver_confirmed' && (
+            <TouchableOpacity style={styles.payBtn} onPress={handleRazorpayPay} disabled={paying}>
+              <Ionicons name="card-outline" size={16} color="#FFF" />
+              <Text style={styles.payBtnText}>
+                {paying ? 'Processing...' : `Pay ₹${Math.round((booking.fare?.totalInPaise || 0) / 100)} via Razorpay`}
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* "Customer marked as paid" indicator */}
+          {booking.paymentStatus === 'customer_paid' && (
+            <View style={styles.paidPill}>
+              <Ionicons name="time-outline" size={14} color="#92400E" />
+              <Text style={styles.paidPillText}>You marked as paid — awaiting driver confirmation</Text>
+            </View>
+          )}
+          {booking.paymentStatus === 'driver_confirmed' && (
+            <View style={[styles.paidPill, { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }]}>
+              <Ionicons name="checkmark-circle" size={14} color="#065F46" />
+              <Text style={[styles.paidPillText, { color: '#065F46' }]}>Payment confirmed</Text>
+            </View>
+          )}
         </View>
       )}
 
@@ -477,6 +585,10 @@ const styles = StyleSheet.create({
   driverLabel: { fontSize: 10, fontWeight: '800', color: '#92400E', letterSpacing: 0.5 },
   driverName: { fontSize: 15, fontWeight: '700', color: '#111827', marginTop: 2 },
   callBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#10B981', borderRadius: 10, paddingVertical: 10, marginTop: 12 },
+  payBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', borderRadius: 10, paddingVertical: 12, marginTop: 8, shadowColor: '#3B82F6', shadowOpacity: 0.2, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  payBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
+  paidPill: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#FEF3C7', borderRadius: 10, paddingVertical: 8, marginTop: 8, borderWidth: 1, borderColor: '#FDE68A' },
+  paidPillText: { color: '#92400E', fontSize: 12, fontWeight: '700' },
   callBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
 
   otpBox: { borderWidth: 2, borderRadius: 14, padding: 16, marginTop: 12, alignItems: 'center' },

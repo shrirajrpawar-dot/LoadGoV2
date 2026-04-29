@@ -12,6 +12,7 @@ export default function DriverEarnings() {
   const { user, profile, driverDoc } = useAuth();
   const [completedBookings, setCompletedBookings] = useState([]);
   const [pendingCodCommission, setPendingCodCommission] = useState(0);
+  const [sarthiOwesDriver, setSarthiOwesDriver] = useState(0); // unsettled razorpay payouts
   const [loading, setLoading] = useState(true);
   const [pageSize, setPageSize] = useState(30);
   const [hasMore, setHasMore] = useState(false);
@@ -48,7 +49,26 @@ export default function DriverEarnings() {
       setPendingCodCommission(total);
     });
 
-    return () => { unsubPaged(); unsubPending(); };
+    // Unsettled Razorpay payouts — Sarthi owes driver these
+    // Booking is razorpay + completed + payoutStatus !== 'settled'
+    const qPayouts = query(
+      collection(db, 'bookings'),
+      where('driverId', '==', user.uid),
+      where('paymentMethod', '==', 'razorpay'),
+      where('status', '==', 'completed')
+    );
+    const unsubPayouts = onSnapshot(qPayouts, (snap) => {
+      const total = snap.docs.reduce((sum, d) => {
+        const data = d.data();
+        if (data.payoutStatus === 'settled') return sum; // already paid out
+        const fare = data.fare?.totalInPaise || 0;
+        const commission = data.commission?.amountInPaise || 0;
+        return sum + (fare - commission); // driver's earning
+      }, 0);
+      setSarthiOwesDriver(total);
+    });
+
+    return () => { unsubPaged(); unsubPending(); unsubPayouts(); };
   }, [user?.uid, pageSize]);
 
   if (loading) {
@@ -78,6 +98,34 @@ export default function DriverEarnings() {
           <Text style={s.totalLabel}>Total Earnings</Text>
           <Text style={s.totalAmount}>₹{(totalPaise / 100).toFixed(0)}</Text>
         </View>
+
+        {/* Net Balance: Sarthi owes you - You owe Sarthi */}
+        {(sarthiOwesDriver > 0 || pendingCodCommission > 0) && (() => {
+          const net = sarthiOwesDriver - pendingCodCommission;
+          const positive = net >= 0;
+          return (
+            <View style={[s.balanceCard, positive ? s.balancePositive : s.balanceNegative]}>
+              <Text style={s.balanceLabel}>
+                {positive ? 'Sarthi owes you' : 'You owe Sarthi'}
+              </Text>
+              <Text style={[s.balanceAmount, positive ? s.balancePositiveTxt : s.balanceNegativeTxt]}>
+                ₹{Math.abs(Math.round(net / 100))}
+              </Text>
+              <View style={s.balanceBreakdown}>
+                {sarthiOwesDriver > 0 && (
+                  <Text style={s.balanceLine}>
+                    + ₹{Math.round(sarthiOwesDriver / 100)} unsettled UPI/card payouts
+                  </Text>
+                )}
+                {pendingCodCommission > 0 && (
+                  <Text style={s.balanceLine}>
+                    − ₹{Math.round(pendingCodCommission / 100)} commission you owe (cash collected)
+                  </Text>
+                )}
+              </View>
+            </View>
+          );
+        })()}
 
         {/* COD Commission Owed */}
         {pendingCodCommission > 0 && (
@@ -421,6 +469,15 @@ const s = StyleSheet.create({
   totalCard: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 18, alignItems: 'center', marginBottom: 16, borderWidth: 1, borderColor: '#F3F4F6', shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 8, elevation: 2 },
   totalLabel: { fontSize: 13, color: '#6B7280', fontWeight: '700', letterSpacing: 0.5, textTransform: 'uppercase' },
   totalAmount: { fontSize: 30, fontWeight: '800', color: '#111827', marginTop: 6 },
+  balanceCard: { borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1.5 },
+  balancePositive: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
+  balanceNegative: { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' },
+  balanceLabel: { fontSize: 12, fontWeight: '800', color: '#374151', letterSpacing: 0.4, textTransform: 'uppercase' },
+  balanceAmount: { fontSize: 30, fontWeight: '900', marginTop: 6, letterSpacing: -1 },
+  balancePositiveTxt: { color: '#065F46' },
+  balanceNegativeTxt: { color: '#92400E' },
+  balanceBreakdown: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.06)' },
+  balanceLine: { fontSize: 12, color: '#374151', fontWeight: '600', marginVertical: 2 },
 
   // COD Owed card — amber alert
   codCard: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#FCD34D', borderRadius: 16, padding: 16, marginBottom: 16 },

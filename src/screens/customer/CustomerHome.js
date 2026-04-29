@@ -312,7 +312,9 @@ export default function CustomerHome() {
         pickup: pickupLocation, drop: dropLocation,
         itemsDescription: serviceType === 'parcel' ? itemsDescription.trim() : '',
         paymentMethod, distanceKm: fareQuote.distanceKm, fare: fareQuote.fare,
-        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'upi' ? 'collected' : 'pending_from_driver' },
+        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'cod' ? 'pending_from_driver' : 'collected' },
+        // Payment status: cod gets confirmed at delivery; upi/razorpay before
+        paymentStatus: 'pending', // pending → customer_paid → driver_confirmed
         status: 'searching', 
         pickupOtp: generateOtp(), deliveryOtp: generateOtp(),
         createdAt: serverTimestamp(),
@@ -565,6 +567,37 @@ export default function CustomerHome() {
       </ScrollView>
 
       <View style={styles.pinnedBottom}>
+        {/* Payment method chips — dynamically rendered based on admin settings */}
+        {(() => {
+          const pmSettings = settings.paymentMethods || {};
+          const enabledMethods = Object.entries(pmSettings).filter(([, m]) => m.enabled);
+          // Auto-select default if current selection is disabled
+          if (enabledMethods.length > 0 && !enabledMethods.find(([k]) => k === paymentMethod)) {
+            // Side-effect inside render is naughty but acceptable here — we want self-correction
+            setTimeout(() => setPaymentMethod(enabledMethods[0][0]), 0);
+          }
+          if (enabledMethods.length <= 1) return null; // hide chips if only one method
+          const ICONS = { cod: '💵', upi_direct: '💳', razorpay: '🔷' };
+          const SHORT_LABELS = { cod: 'Cash', upi_direct: 'UPI', razorpay: 'Razorpay' };
+          return (
+            <View style={styles.payChipsRow}>
+              {enabledMethods.map(([key]) => (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.payChip, paymentMethod === key && styles.payChipActive]}
+                  onPress={() => setPaymentMethod(key)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.payChipEmoji}>{ICONS[key] || '💳'}</Text>
+                  <Text style={[styles.payChipText, paymentMethod === key && styles.payChipTextActive]}>
+                    {SHORT_LABELS[key] || key}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          );
+        })()}
+
         <TouchableOpacity style={[styles.actionButton, actionLoading && styles.disabledBtn]} onPress={handleCreateBooking} disabled={actionLoading || quoteLoading || vehicleOptions.length === 0}>
           {actionLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.actionButtonText}>Confirm & Book</Text>}
         </TouchableOpacity>
@@ -828,6 +861,12 @@ const styles = StyleSheet.create({
   minimizedRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   minimizedLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16, flex: 1, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
   actionButton: { height: 46, backgroundColor: '#10B981', borderRadius: 12, alignItems: 'center', justifyContent: 'center', shadowColor: '#10B981', shadowOpacity: 0.2, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  payChipsRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  payChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#F9FAFB', borderRadius: 10, borderWidth: 1.5, borderColor: '#F3F4F6' },
+  payChipActive: { borderColor: '#111827', backgroundColor: '#FFFFFF' },
+  payChipEmoji: { fontSize: 14 },
+  payChipText: { fontSize: 13, fontWeight: '700', color: '#6B7280' },
+  payChipTextActive: { color: '#111827' },
   confirmLocBtn: { height: 44, backgroundColor: '#111827', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   confirmLocText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.2 },
   disabledBtn: { backgroundColor: '#D1D5DB', shadowOpacity: 0 },

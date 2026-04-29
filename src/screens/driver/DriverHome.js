@@ -407,6 +407,45 @@ export default function DriverHome() {
               </TouchableOpacity>
             )}
             
+            {/* Payment confirmation banner — UPI direct, customer marked paid but driver hasn't confirmed */}
+            {currentBooking.paymentMethod === 'upi_direct' &&
+             currentBooking.paymentStatus === 'customer_paid' && (
+              <View style={s.paymentBanner}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.paymentBannerTitle}>💳 Customer says they've paid via UPI</Text>
+                  <Text style={s.paymentBannerSub}>
+                    Check your UPI app for ₹{Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} from {currentBooking.customerName || 'customer'}.
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={s.paymentConfirmBtn}
+                  onPress={async () => {
+                    try {
+                      await updateDoc(doc(db, 'bookings', currentBooking.id), {
+                        paymentStatus: 'driver_confirmed',
+                        paymentConfirmedAt: serverTimestamp(),
+                      });
+                      Alert.alert('✓ Payment Confirmed', 'Marked as received.');
+                    } catch (e) {
+                      Alert.alert('Error', e.message);
+                    }
+                  }}
+                >
+                  <Text style={s.paymentConfirmBtnTxt}>I Got It</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* If UPI booking and customer hasn't yet marked paid, remind driver */}
+            {currentBooking.paymentMethod === 'upi_direct' &&
+             !currentBooking.paymentStatus && (
+              <View style={s.paymentBannerInfo}>
+                <Text style={s.paymentBannerSub}>
+                  ℹ️ This is a UPI booking. Customer will pay you directly when ready.
+                </Text>
+              </View>
+            )}
+
             {['accepted', 'picked_up'].includes(currentBooking.status) ? (
               <TouchableOpacity style={s.btn} onPress={() => updateBookingStatus(currentBooking.status === 'accepted' ? 'arrived' : 'reached_dropoff')}>
                 <Text style={s.btnTxt}>I HAVE ARRIVED</Text>
@@ -525,6 +564,7 @@ export default function DriverHome() {
                             driverId: user.uid,
                             driverName: driverDoc?.kyc?.fullName || profile?.name || 'Driver',
                             driverPhone: profile?.phone || '',
+                            driverUpiId: driverDoc?.kyc?.upiId || '',
                             driverVehicleLabel: driverDoc?.vehicle?.label || '',
                             driverVehicleNumber: driverDoc?.vehicle?.number || '',
                             driverVehicleModel: driverDoc?.vehicle?.model || '',
@@ -585,6 +625,12 @@ const s = StyleSheet.create({
   addressText: { fontSize: 14, color: '#444', marginBottom: 8 },
   btn: { backgroundColor: '#000', padding: 18, borderRadius: 12, alignItems: 'center', marginTop: 10 },
   btnTxt: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  paymentBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, backgroundColor: '#ECFDF5', borderRadius: 12, borderWidth: 1, borderColor: '#A7F3D0', marginBottom: 12 },
+  paymentBannerInfo: { padding: 10, backgroundColor: '#EFF6FF', borderRadius: 10, borderWidth: 1, borderColor: '#DBEAFE', marginBottom: 12 },
+  paymentBannerTitle: { fontSize: 13, fontWeight: '800', color: '#065F46', marginBottom: 2 },
+  paymentBannerSub: { fontSize: 11, color: '#374151', fontWeight: '500' },
+  paymentConfirmBtn: { backgroundColor: '#10B981', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
+  paymentConfirmBtnTxt: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
   navBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', paddingVertical: 13, borderRadius: 12, marginTop: 10 },
   navBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14, letterSpacing: 0.2 },
   input: { borderBottomWidth: 2, borderColor: '#eee', padding: 10, textAlign: 'center', fontSize: 24, fontWeight: 'bold', marginBottom: 10 },
