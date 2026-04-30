@@ -60,6 +60,7 @@ const getFriendlyStatus = (status) => {
     case 'picked_up': return 'In transit to dropoff';
     case 'reached': 
     case 'reached_dropoff': return 'Driver reached dropoff';
+    case 'awaiting_payment': return 'Pay the driver';
     case 'completed': return 'Booking completed';
     case 'cancelled': 
     case 'cancelled_by_customer': return 'Booking cancelled';
@@ -608,8 +609,8 @@ export default function CustomerHome() {
   const renderActiveBooking = () => {
     if (!activeBooking) return null;
 
-    const isPostPickup = ['picked_up', 'reached', 'reached_dropoff', 'completed'].includes(activeBooking.status);
-    const isAtDropoff = ['reached', 'reached_dropoff', 'completed'].includes(activeBooking.status);
+    const isPostPickup = ['picked_up', 'reached', 'reached_dropoff', 'awaiting_payment', 'completed'].includes(activeBooking.status);
+    const isAtDropoff = ['reached', 'reached_dropoff', 'awaiting_payment', 'completed'].includes(activeBooking.status);
 
     if (isMinimized) {
       return (
@@ -637,23 +638,103 @@ export default function CustomerHome() {
           </TouchableOpacity>
         </View>
 
-        <View style={styles.otpCard}>
-          <View style={styles.otpBlock}>
-            <Text style={styles.otpLabel}>Pickup OTP</Text>
-            <Text style={[styles.otpValue, isPostPickup && { color: '#10B981' }]}>
-              {isPostPickup ? '✓' : activeBooking.pickupOtp}
-            </Text>
-          </View>
-          <View style={styles.otpDivider} />
-          <View style={styles.otpBlock}>
-            <Text style={styles.otpLabel}>Dropoff OTP</Text>
-            {isAtDropoff ? (
-              <Text style={styles.otpValue}>{activeBooking.deliveryOtp}</Text>
-            ) : (
-              <Text style={styles.otpMasked}>Wait for arrival</Text>
+        {activeBooking.status === 'awaiting_payment' ? (
+          <View style={styles.paymentCard}>
+            <View style={styles.paymentCardHeader}>
+              <Text style={styles.paymentCardEmoji}>💳</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.paymentCardTitle}>Delivery Complete — Pay Now</Text>
+                <Text style={styles.paymentCardAmount}>
+                  ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)}
+                </Text>
+              </View>
+            </View>
+
+            {activeBooking.paymentStatus !== 'customer_paid' && activeBooking.paymentStatus !== 'driver_confirmed' && (
+              <TouchableOpacity
+                style={styles.payUpiBtn}
+                onPress={async () => {
+                  const driverUpi = activeBooking.driverUpiId;
+                  if (!driverUpi) {
+                    Alert.alert('UPI not available', 'Driver has not set up their UPI ID. Please pay in cash.');
+                    return;
+                  }
+                  const amount = Math.round((activeBooking.fare?.totalInPaise || 0) / 100);
+                  const driverName = encodeURIComponent(activeBooking.driverName || 'Driver');
+                  const note = encodeURIComponent(`Sarthi-${activeBooking.id.slice(0, 8)}`);
+                  const upiUrl = `upi://pay?pa=${driverUpi}&pn=${driverName}&am=${amount}&cu=INR&tn=${note}`;
+                  try {
+                    const supported = await Linking.canOpenURL(upiUrl);
+                    if (!supported) {
+                      Alert.alert('No UPI App', `No UPI app found. Pay manually to ${driverUpi}, amount ₹${amount}`);
+                      return;
+                    }
+                    await Linking.openURL(upiUrl);
+                    setTimeout(() => {
+                      Alert.alert(
+                        'Did you complete the payment?',
+                        'Confirm only after payment is successful in your UPI app.',
+                        [
+                          { text: 'Not yet', style: 'cancel' },
+                          {
+                            text: 'Yes, I paid',
+                            onPress: async () => {
+                              try {
+                                await updateDoc(doc(db, 'bookings', activeBooking.id), {
+                                  paymentStatus: 'customer_paid',
+                                  customerPaidAt: new Date().toISOString(),
+                                });
+                              } catch (e) {
+                                Alert.alert('Error', e.message);
+                              }
+                            },
+                          },
+                        ]
+                      );
+                    }, 800);
+                  } catch (e) {
+                    Alert.alert('Error', e.message);
+                  }
+                }}
+              >
+                <Ionicons name="card-outline" size={18} color="#FFF" />
+                <Text style={styles.payUpiBtnText}>Pay ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)} via UPI</Text>
+              </TouchableOpacity>
+            )}
+
+            {activeBooking.paymentStatus === 'customer_paid' && (
+              <View style={styles.paidConfirmPill}>
+                <Ionicons name="time-outline" size={16} color="#92400E" />
+                <Text style={styles.paidConfirmText}>You marked as paid — waiting for driver to confirm</Text>
+              </View>
+            )}
+
+            {activeBooking.paymentStatus === 'driver_confirmed' && (
+              <View style={[styles.paidConfirmPill, { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }]}>
+                <Ionicons name="checkmark-circle" size={16} color="#065F46" />
+                <Text style={[styles.paidConfirmText, { color: '#065F46' }]}>Payment confirmed!</Text>
+              </View>
             )}
           </View>
-        </View>
+        ) : (
+          <View style={styles.otpCard}>
+            <View style={styles.otpBlock}>
+              <Text style={styles.otpLabel}>Pickup OTP</Text>
+              <Text style={[styles.otpValue, isPostPickup && { color: '#10B981' }]}>
+                {isPostPickup ? '✓' : activeBooking.pickupOtp}
+              </Text>
+            </View>
+            <View style={styles.otpDivider} />
+            <View style={styles.otpBlock}>
+              <Text style={styles.otpLabel}>Dropoff OTP</Text>
+              {isAtDropoff ? (
+                <Text style={styles.otpValue}>{activeBooking.deliveryOtp}</Text>
+              ) : (
+                <Text style={styles.otpMasked}>Wait for arrival</Text>
+              )}
+            </View>
+          </View>
+        )}
 
         {/* Driver details — shown after acceptance, hidden once trip ends */}
         {activeBooking.driverName &&
@@ -852,6 +933,15 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 15, fontWeight: '800', color: '#10B981', flexShrink: 1 },
   minimizeBtn: { width: 48, height: 48, backgroundColor: '#F9FAFB', borderRadius: 24, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F3F4F6' },
   otpCard: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 1, borderColor: '#F3F4F6', shadowColor: '#000', shadowOpacity: 0.03, shadowRadius: 8, elevation: 2 },
+  paymentCard: { backgroundColor: '#FEF3C7', borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1.5, borderColor: '#FDE68A' },
+  paymentCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 14 },
+  paymentCardEmoji: { fontSize: 28 },
+  paymentCardTitle: { fontSize: 14, fontWeight: '800', color: '#92400E', letterSpacing: 0.2 },
+  paymentCardAmount: { fontSize: 28, fontWeight: '900', color: '#78350F', marginTop: 2, letterSpacing: -1 },
+  payUpiBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#10B981', borderRadius: 12, paddingVertical: 14, marginTop: 4 },
+  payUpiBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', letterSpacing: 0.3 },
+  paidConfirmPill: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FEF3C7', borderRadius: 10, padding: 12, marginTop: 10, borderWidth: 1, borderColor: '#FDE68A' },
+  paidConfirmText: { fontSize: 12, fontWeight: '700', color: '#92400E', flex: 1 },
   otpBlock: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   otpLabel: { fontSize: 12, color: '#9CA3AF', fontWeight: '700', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   otpValue: { fontSize: 26, color: '#111827', fontWeight: '900', letterSpacing: 3 },

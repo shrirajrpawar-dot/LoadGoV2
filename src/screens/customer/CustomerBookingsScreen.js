@@ -15,7 +15,7 @@ import { httpsCallable } from 'firebase/functions';
 import { functions } from '../../../firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 
-const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'in_progress', 'at_drop'];
+const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'arrived', 'in_progress', 'picked_up', 'at_drop', 'reached_dropoff', 'awaiting_payment'];
 
 function callPhone(phone) {
   if (!phone) return;
@@ -387,9 +387,13 @@ function BookingCard({ booking, settings }) {
     switch (booking.status) {
       case 'searching': return { color: '#3B82F6', label: 'Finding Driver', icon: 'search-outline' };
       case 'accepted': return { color: '#F59E0B', label: 'Driver Coming to Pickup', icon: 'car-outline' };
-      case 'at_pickup': return { color: '#8B5CF6', label: 'Driver at Pickup', icon: 'location-outline' };
-      case 'in_progress': return { color: '#10B981', label: 'On the Way', icon: 'navigate-outline' };
-      case 'at_drop': return { color: '#10B981', label: 'Driver at Drop', icon: 'flag-outline' };
+      case 'at_pickup':
+      case 'arrived': return { color: '#8B5CF6', label: 'Driver at Pickup', icon: 'location-outline' };
+      case 'in_progress':
+      case 'picked_up': return { color: '#10B981', label: 'On the Way', icon: 'navigate-outline' };
+      case 'at_drop':
+      case 'reached_dropoff': return { color: '#10B981', label: 'Driver at Drop', icon: 'flag-outline' };
+      case 'awaiting_payment': return { color: '#F59E0B', label: 'Payment Pending', icon: 'wallet-outline' };
       case 'completed': return { color: '#10B981', label: 'Delivered', icon: 'checkmark-circle' };
       case 'cancelled': return { color: '#EF4444', label: 'Cancelled', icon: 'close-circle' };
       default: return { color: '#9CA3AF', label: booking.status, icon: 'ellipse-outline' };
@@ -462,49 +466,49 @@ function BookingCard({ booking, settings }) {
               <Text style={styles.callBtnText}>Call {booking.driverPhone}</Text>
             </TouchableOpacity>
           ) : null}
-
-          {/* Payment Action — UPI direct or Razorpay, while booking is active */}
-          {ACTIVE_STATUSES.includes(booking.status) &&
-           booking.status !== 'searching' &&
-           booking.paymentStatus !== 'customer_paid' &&
-           booking.paymentStatus !== 'driver_confirmed' &&
-           (booking.paymentMethod === 'upi_direct' || booking.paymentMethod === 'upi') && (
-            <TouchableOpacity style={styles.payBtn} onPress={handleUpiDirectPay}>
-              <Ionicons name="card-outline" size={16} color="#FFF" />
-              <Text style={styles.payBtnText}>
-                Pay ₹{Math.round((booking.fare?.totalInPaise || 0) / 100)} via UPI
-              </Text>
-            </TouchableOpacity>
-          )}
-          {ACTIVE_STATUSES.includes(booking.status) &&
-           booking.paymentMethod === 'razorpay' &&
-           booking.paymentStatus !== 'driver_confirmed' && (
-            <TouchableOpacity style={styles.payBtn} onPress={handleRazorpayPay} disabled={paying}>
-              <Ionicons name="card-outline" size={16} color="#FFF" />
-              <Text style={styles.payBtnText}>
-                {paying ? 'Processing...' : `Pay ₹${Math.round((booking.fare?.totalInPaise || 0) / 100)} via Razorpay`}
-              </Text>
-            </TouchableOpacity>
-          )}
-
-          {/* "Customer marked as paid" indicator */}
-          {booking.paymentStatus === 'customer_paid' && (
-            <View style={styles.paidPill}>
-              <Ionicons name="time-outline" size={14} color="#92400E" />
-              <Text style={styles.paidPillText}>You marked as paid — awaiting driver confirmation</Text>
-            </View>
-          )}
-          {booking.paymentStatus === 'driver_confirmed' && (
-            <View style={[styles.paidPill, { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }]}>
-              <Ionicons name="checkmark-circle" size={14} color="#065F46" />
-              <Text style={[styles.paidPillText, { color: '#065F46' }]}>Payment confirmed</Text>
-            </View>
-          )}
         </View>
       )}
 
-      {/* PICKUP OTP */}
-      {booking.status === 'at_pickup' && booking.pickupOtp && (
+      {/* Payment Action — OUTSIDE driverBox so it always shows */}
+      {ACTIVE_STATUSES.includes(booking.status) &&
+       booking.status !== 'searching' &&
+       booking.paymentStatus !== 'customer_paid' &&
+       booking.paymentStatus !== 'driver_confirmed' &&
+       (booking.paymentMethod === 'upi_direct' || booking.paymentMethod === 'upi') && (
+        <TouchableOpacity style={styles.payBtn} onPress={handleUpiDirectPay}>
+          <Ionicons name="card-outline" size={16} color="#FFF" />
+          <Text style={styles.payBtnText}>
+            Pay ₹{Math.round((booking.fare?.totalInPaise || 0) / 100)} via UPI
+          </Text>
+        </TouchableOpacity>
+      )}
+      {ACTIVE_STATUSES.includes(booking.status) &&
+       booking.paymentMethod === 'razorpay' &&
+       booking.paymentStatus !== 'driver_confirmed' && (
+        <TouchableOpacity style={styles.payBtn} onPress={handleRazorpayPay} disabled={paying}>
+          <Ionicons name="card-outline" size={16} color="#FFF" />
+          <Text style={styles.payBtnText}>
+            {paying ? 'Processing...' : `Pay ₹${Math.round((booking.fare?.totalInPaise || 0) / 100)} via Razorpay`}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {/* "Customer marked as paid" indicator */}
+      {booking.paymentStatus === 'customer_paid' && (
+        <View style={styles.paidPill}>
+          <Ionicons name="time-outline" size={14} color="#92400E" />
+          <Text style={styles.paidPillText}>You marked as paid — awaiting driver confirmation</Text>
+        </View>
+      )}
+      {booking.paymentStatus === 'driver_confirmed' && (
+        <View style={[styles.paidPill, { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }]}>
+          <Ionicons name="checkmark-circle" size={14} color="#065F46" />
+          <Text style={[styles.paidPillText, { color: '#065F46' }]}>Payment confirmed</Text>
+        </View>
+      )}
+
+      {/* PICKUP OTP — driver has arrived at pickup */}
+      {(booking.status === 'at_pickup' || booking.status === 'arrived') && booking.pickupOtp && (
         <View style={[styles.otpBox, { borderColor: '#3B82F6', backgroundColor: '#EFF6FF' }]}>
           <Text style={[styles.otpStage, { color: '#3B82F6' }]}>STAGE 1 OF 2</Text>
           <Text style={[styles.otpLabel, { color: '#3B82F6' }]}>PICKUP OTP</Text>
@@ -515,8 +519,8 @@ function BookingCard({ booking, settings }) {
         </View>
       )}
 
-      {/* DELIVERY OTP */}
-      {booking.status === 'at_drop' && booking.deliveryOtp && (
+      {/* DELIVERY OTP — driver has reached dropoff */}
+      {(booking.status === 'at_drop' || booking.status === 'reached_dropoff') && booking.deliveryOtp && (
         <View style={[styles.otpBox, { borderColor: '#10B981', backgroundColor: '#ECFDF5' }]}>
           <Text style={[styles.otpStage, { color: '#10B981' }]}>STAGE 2 OF 2</Text>
           <Text style={[styles.otpLabel, { color: '#10B981' }]}>DELIVERY OTP</Text>
@@ -524,6 +528,29 @@ function BookingCard({ booking, settings }) {
           <Text style={[styles.otpHint, { color: '#10B981' }]}>
             Tell this code to the driver to complete delivery
           </Text>
+        </View>
+      )}
+
+      {/* AWAITING PAYMENT — delivery verified, now pay the driver */}
+      {booking.status === 'awaiting_payment' && (
+        <View style={[styles.otpBox, { borderColor: '#F59E0B', backgroundColor: '#FEF3C7' }]}>
+          <Text style={[styles.otpStage, { color: '#92400E' }]}>DELIVERY COMPLETE</Text>
+          <Text style={[styles.otpLabel, { color: '#92400E' }]}>💳 PAY THE DRIVER</Text>
+          <Text style={[styles.otpHint, { color: '#78350F', marginTop: 6, fontSize: 13, fontWeight: '600' }]}>
+            Your delivery is verified. Please pay ₹{Math.round((booking.fare?.totalInPaise || 0) / 100)} to the driver via UPI.
+          </Text>
+          {booking.paymentStatus !== 'customer_paid' && booking.paymentStatus !== 'driver_confirmed' && (
+            <Text style={[styles.otpHint, { color: '#92400E', marginTop: 4 }]}>
+              Tap the "Pay via UPI" button to complete payment.
+            </Text>
+          )}
+          {booking.paymentStatus === 'customer_paid' && (
+            <View style={{ marginTop: 10, backgroundColor: '#ECFDF5', padding: 10, borderRadius: 10 }}>
+              <Text style={{ color: '#065F46', fontSize: 13, fontWeight: '700', textAlign: 'center' }}>
+                ✅ You've marked as paid — waiting for driver to confirm
+              </Text>
+            </View>
+          )}
         </View>
       )}
 

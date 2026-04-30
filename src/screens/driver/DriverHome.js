@@ -48,7 +48,7 @@ export default function DriverHome() {
   const isKycApproved = kycStatus === 'approved' || kycStatus === 'verified';
 
   // Active states the driver still cares about (current trip)
-  const ACTIVE_STATES = ['accepted', 'arrived', 'picked_up', 'reached_dropoff'];
+  const ACTIVE_STATES = ['accepted', 'arrived', 'picked_up', 'reached_dropoff', 'awaiting_payment'];
 
   const currentBooking = myBookings.find(b => ACTIVE_STATES.includes(b.status)) || null;
 
@@ -213,6 +213,30 @@ export default function DriverHome() {
     setActionLoading(false);
   };
 
+  const completeBooking = async (booking) => {
+    await updateDoc(doc(db, 'bookings', booking.id), {
+      status: 'completed',
+      completedAt: serverTimestamp(),
+    });
+
+    const totalFare = booking.fare?.totalInPaise || 0;
+    const commissionPct = booking.commission?.pct || 20;
+    const earnPaise = Math.round(totalFare * (100 - commissionPct) / 100);
+
+    const driverRef = doc(db, 'drivers', user.uid);
+    const driverSnap = await getDoc(driverRef);
+    const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
+
+    await updateDoc(driverRef, {
+      earnings: {
+        todayInPaise: (cur.todayInPaise || 0) + earnPaise,
+        totalInPaise: (cur.totalInPaise || 0) + earnPaise,
+      },
+    });
+
+    Alert.alert("Job Done!", `You earned ₹${Math.round(earnPaise / 100)}`);
+  };
+
   const verifyOtp = async (type) => {
     if (!currentBooking) return;
     const correct = type === 'pickup' ? currentBooking.pickupOtp : currentBooking.deliveryOtp;
@@ -223,30 +247,25 @@ export default function DriverHome() {
       if (type === 'pickup') {
         await updateDoc(doc(db, 'bookings', currentBooking.id), { status: 'picked_up' });
       } else {
-        // Mark booking completed
-        await updateDoc(doc(db, 'bookings', currentBooking.id), {
-          status: 'completed',
-          completedAt: serverTimestamp(),
-        });
+        // Check if UPI payment is pending before completing
+        const isUpi = currentBooking.paymentMethod === 'upi_direct' || currentBooking.paymentMethod === 'upi';
+        const isPaid = currentBooking.paymentStatus === 'driver_confirmed';
+        const isCod = currentBooking.paymentMethod === 'cod' || !currentBooking.paymentMethod;
 
-        // Calculate driver earning using booking's actual commission %
-        const totalFare = currentBooking.fare?.totalInPaise || 0;
-        const commissionPct = currentBooking.commission?.pct || 20;
-        const earnPaise = Math.round(totalFare * (100 - commissionPct) / 100);
-
-        // Read existing earnings, then increment
-        const driverRef = doc(db, 'drivers', user.uid);
-        const driverSnap = await getDoc(driverRef);
-        const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
-
-        await updateDoc(driverRef, {
-          earnings: {
-            todayInPaise: (cur.todayInPaise || 0) + earnPaise,
-            totalInPaise: (cur.totalInPaise || 0) + earnPaise,
-          },
-        });
-
-        Alert.alert("Job Done!", `You earned ₹${Math.round(earnPaise / 100)}`);
+        if (isUpi && !isPaid) {
+          // UPI not yet confirmed — park in awaiting_payment
+          await updateDoc(doc(db, 'bookings', currentBooking.id), {
+            status: 'awaiting_payment',
+            deliveryOtpVerifiedAt: serverTimestamp(),
+          });
+          Alert.alert(
+            "Delivery Verified!",
+            "Now confirm you've received the UPI payment to complete this trip."
+          );
+        } else {
+          // Cash or already-paid UPI or Razorpay — complete immediately
+          await completeBooking(currentBooking);
+        }
       }
       setOtpInput('');
     } catch (e) {
@@ -446,7 +465,42 @@ export default function DriverHome() {
               </View>
             )}
 
-            {['accepted', 'picked_up'].includes(currentBooking.status) ? (
+            {currentBooking.status === 'awaiting_payment' ? (
+              <View>
+                <View style={s.awaitingPaymentCard}>
+                  <Text style={s.awaitingPaymentTitle}>📦 Delivery Verified!</Text>
+                  <Text style={s.awaitingPaymentSub}>
+                    Collect ₹{Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} via UPI from {currentBooking.customerName || 'customer'}.
+                  </Text>
+                  <Text style={s.awaitingPaymentHint}>
+                    Ask customer to pay your UPI ID. Once you receive the money, tap below.
+                  </Text>
+                </View>
+                {currentBooking.paymentStatus === 'customer_paid' && (
+                  <View style={s.paymentBanner}>
+                    <Text style={s.paymentBannerTitle}>✅ Customer says they've paid!</Text>
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={[s.btn, { backgroundColor: '#10B981' }]}
+                  onPress={async () => {
+                    setActionLoading(true);
+                    try {
+                      await updateDoc(doc(db, 'bookings', currentBooking.id), {
+                        paymentStatus: 'driver_confirmed',
+                        paymentConfirmedAt: serverTimestamp(),
+                      });
+                      await completeBooking(currentBooking);
+                    } catch (e) {
+                      Alert.alert('Error', e.message);
+                    }
+                    setActionLoading(false);
+                  }}
+                >
+                  {actionLoading ? <ActivityIndicator color="#fff" /> : <Text style={s.btnTxt}>PAYMENT RECEIVED — COMPLETE TRIP</Text>}
+                </TouchableOpacity>
+              </View>
+            ) : ['accepted', 'picked_up'].includes(currentBooking.status) ? (
               <TouchableOpacity style={s.btn} onPress={() => updateBookingStatus(currentBooking.status === 'accepted' ? 'arrived' : 'reached_dropoff')}>
                 <Text style={s.btnTxt}>I HAVE ARRIVED</Text>
               </TouchableOpacity>
@@ -631,6 +685,10 @@ const s = StyleSheet.create({
   paymentBannerSub: { fontSize: 11, color: '#374151', fontWeight: '500' },
   paymentConfirmBtn: { backgroundColor: '#10B981', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
   paymentConfirmBtnTxt: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
+  awaitingPaymentCard: { backgroundColor: '#FEF3C7', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FDE68A', marginBottom: 14 },
+  awaitingPaymentTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
+  awaitingPaymentSub: { fontSize: 14, fontWeight: '700', color: '#78350F', marginBottom: 6 },
+  awaitingPaymentHint: { fontSize: 12, fontWeight: '500', color: '#92400E' },
   navBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', paddingVertical: 13, borderRadius: 12, marginTop: 10 },
   navBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14, letterSpacing: 0.2 },
   input: { borderBottomWidth: 2, borderColor: '#eee', padding: 10, textAlign: 'center', fontSize: 24, fontWeight: 'bold', marginBottom: 10 },
