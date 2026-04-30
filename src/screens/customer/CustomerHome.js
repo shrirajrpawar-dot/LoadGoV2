@@ -60,6 +60,7 @@ const getFriendlyStatus = (status) => {
     case 'picked_up': return 'In transit to dropoff';
     case 'reached': 
     case 'reached_dropoff': return 'Driver reached dropoff';
+    case 'awaiting_payment': return 'Pay the driver';
     case 'completed': return 'Booking completed';
     case 'cancelled': 
     case 'cancelled_by_customer': return 'Booking cancelled';
@@ -165,7 +166,8 @@ export default function CustomerHome() {
       } catch (error) {
         if (!cancelled) {
           setFareQuote(null);
-          Alert.alert("Fare Error", error.message);
+          // Don't pop up alert on auto-quote — log silently. User sees inline error in the fare card.
+          console.warn('Fare quote failed:', error.message);
         }
       } finally {
         if (!cancelled) setQuoteLoading(false);
@@ -311,7 +313,9 @@ export default function CustomerHome() {
         pickup: pickupLocation, drop: dropLocation,
         itemsDescription: serviceType === 'parcel' ? itemsDescription.trim() : '',
         paymentMethod, distanceKm: fareQuote.distanceKm, fare: fareQuote.fare,
-        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'upi' ? 'collected' : 'pending_from_driver' },
+        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'cod' ? 'pending_from_driver' : 'collected' },
+        // Payment status: cod gets confirmed at delivery; upi/razorpay before
+        paymentStatus: 'pending', // pending → customer_paid → driver_confirmed
         status: 'searching', 
         pickupOtp: generateOtp(), deliveryOtp: generateOtp(),
         createdAt: serverTimestamp(),
@@ -463,30 +467,37 @@ export default function CustomerHome() {
           </View>
         </View>
 
+        {serviceType === 'parcel' && (
+          <TextInput style={styles.packageInput} value={itemsDescription} onChangeText={setItemsDescription} placeholder="What are you sending? E.g. Documents, Clothes..." placeholderTextColor="#9CA3AF" />
+        )}
+
         <Text style={styles.sheetTitleSmall}>Select Vehicle</Text>
-        
+
         {vehicleOptions.length === 0 ? (
           <View style={styles.emptyVehicles}><ActivityIndicator color="#111827" /><Text style={styles.emptyVehiclesText}>Loading vehicles...</Text></View>
         ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalVehicleScroll}>
+          <View style={styles.vehicleList}>
             {vehicleOptions.map(v => {
               const active = selectedVehicle === v.id;
               return (
-                <TouchableOpacity key={v.id} style={[styles.vehicleCardHorizontal, active && styles.vehicleCardActive]} onPress={() => setSelectedVehicle(v.id)} activeOpacity={0.8}>
-                  <View style={[styles.vehicleIconCircle, active && styles.vehicleIconCircleActive]}>
-                    <Ionicons name={vehicleIconName(v.id)} size={28} color={active ? '#111827' : '#6B7280'} />
+                <TouchableOpacity
+                  key={v.id}
+                  style={[styles.vehicleListRow, active && styles.vehicleListRowActive]}
+                  onPress={() => setSelectedVehicle(v.id)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.vehicleListIcon, active && styles.vehicleListIconActive]}>
+                    <Ionicons name={vehicleIconName(v.id)} size={16} color={active ? '#111827' : '#6B7280'} />
                   </View>
-                  <Text style={[styles.vName, active && styles.vNameActive]} numberOfLines={1}>{v.label}</Text>
-                  <Text style={styles.vCap} numberOfLines={1}>{v.capacity || 'Standard'}</Text>
-                  <Text style={[styles.vPrice, active && styles.vPriceActive]}>₹{v.baseFare}+</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.vehicleListName, active && styles.vehicleListNameActive]} numberOfLines={1}>{v.label}</Text>
+                    {v.capacity ? <Text style={styles.vehicleListCap} numberOfLines={1}>{v.capacity}</Text> : null}
+                  </View>
+                  <Text style={[styles.vehicleListPrice, active && styles.vehicleListPriceActive]}>₹{v.baseFare}+</Text>
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
-        )}
-
-        {serviceType === 'parcel' && (
-          <TextInput style={styles.packageInput} value={itemsDescription} onChangeText={setItemsDescription} placeholder="E.g. Documents, Clothes..." placeholderTextColor="#9CA3AF" />
+          </View>
         )}
 
         <View style={styles.receiptBox}>
@@ -502,11 +513,50 @@ export default function CustomerHome() {
                 </Text>
                 <Text style={styles.receiptValue}>₹{Math.round((fareQuote.fare.distanceFare || 0) / 100)}</Text>
               </View>
+
+              {/* Pickup premium row — only show if there is one */}
+              {(fareQuote.fare.pickupPremium || 0) > 0 && (
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>
+                    Pickup (max)
+                  </Text>
+                  <Text style={styles.receiptValue}>
+                    +₹{Math.round((fareQuote.fare.pickupPremium || 0) / 100)}
+                  </Text>
+                </View>
+              )}
+
               <View style={styles.receiptDivider} />
-              <View style={styles.receiptRow}>
-                <Text style={styles.receiptTotalLabel}>Total Fare</Text>
-                <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>
-              </View>
+
+              {/* If we got a range from the cloud function, show "₹X–₹Y" */}
+              {fareQuote.fareRange ? (
+                <>
+                  <View style={styles.receiptRow}>
+                    <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+                    <Text style={styles.receiptTotalValue}>
+                      ₹{Math.round(fareQuote.fareRange.minInPaise / 100)}–₹{Math.round(fareQuote.fareRange.maxInPaise / 100)}
+                    </Text>
+                  </View>
+                  <Text style={styles.fareRangeNote}>Final price depends on driver distance from pickup.</Text>
+                </>
+              ) : (
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptTotalLabel}>Total Fare</Text>
+                  <Text style={styles.receiptTotalValue}>₹{totalFare}</Text>
+                </View>
+              )}
+
+              {/* Pickup ETA */}
+              {(fareQuote.pickupEtaRange || fareQuote.etaRange) && (
+                <View style={[styles.receiptRow, { marginTop: 8 }]}>
+                  <Text style={styles.receiptLabel}>Pickup in</Text>
+                  <Text style={styles.receiptValue}>
+                    {fareQuote.pickupEtaRange
+                      ? `${fareQuote.pickupEtaRange.minMinutes}–${fareQuote.pickupEtaRange.maxMinutes} min`
+                      : `${fareQuote.etaRange.minMinutes}–${fareQuote.etaRange.maxMinutes} min`}
+                  </Text>
+                </View>
+              )}
             </>
           ) : (
             <View style={styles.receiptRow}>
@@ -518,6 +568,37 @@ export default function CustomerHome() {
       </ScrollView>
 
       <View style={styles.pinnedBottom}>
+        {/* Payment method chips — dynamically rendered based on admin settings */}
+        {(() => {
+          const pmSettings = settings.paymentMethods || {};
+          const enabledMethods = Object.entries(pmSettings).filter(([, m]) => m.enabled);
+          // Auto-select default if current selection is disabled
+          if (enabledMethods.length > 0 && !enabledMethods.find(([k]) => k === paymentMethod)) {
+            // Side-effect inside render is naughty but acceptable here — we want self-correction
+            setTimeout(() => setPaymentMethod(enabledMethods[0][0]), 0);
+          }
+          if (enabledMethods.length <= 1) return null; // hide chips if only one method
+          const ICONS = { cod: '💵', upi_direct: '💳', razorpay: '🔷' };
+          const SHORT_LABELS = { cod: 'Cash', upi_direct: 'UPI', razorpay: 'Razorpay' };
+          return (
+            <View style={styles.payChipsRow}>
+              {enabledMethods.map(([key]) => (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.payChip, paymentMethod === key && styles.payChipActive]}
+                  onPress={() => setPaymentMethod(key)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.payChipEmoji}>{ICONS[key] || '💳'}</Text>
+                  <Text style={[styles.payChipText, paymentMethod === key && styles.payChipTextActive]}>
+                    {SHORT_LABELS[key] || key}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          );
+        })()}
+
         <TouchableOpacity style={[styles.actionButton, actionLoading && styles.disabledBtn]} onPress={handleCreateBooking} disabled={actionLoading || quoteLoading || vehicleOptions.length === 0}>
           {actionLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.actionButtonText}>Confirm & Book</Text>}
         </TouchableOpacity>
@@ -528,8 +609,8 @@ export default function CustomerHome() {
   const renderActiveBooking = () => {
     if (!activeBooking) return null;
 
-    const isPostPickup = ['picked_up', 'reached', 'reached_dropoff', 'completed'].includes(activeBooking.status);
-    const isAtDropoff = ['reached', 'reached_dropoff', 'completed'].includes(activeBooking.status);
+    const isPostPickup = ['picked_up', 'reached', 'reached_dropoff', 'awaiting_payment', 'completed'].includes(activeBooking.status);
+    const isAtDropoff = ['reached', 'reached_dropoff', 'awaiting_payment', 'completed'].includes(activeBooking.status);
 
     if (isMinimized) {
       return (
@@ -557,23 +638,103 @@ export default function CustomerHome() {
           </TouchableOpacity>
         </View>
 
-        <View style={styles.otpCard}>
-          <View style={styles.otpBlock}>
-            <Text style={styles.otpLabel}>Pickup OTP</Text>
-            <Text style={[styles.otpValue, isPostPickup && { color: '#10B981' }]}>
-              {isPostPickup ? '✓' : activeBooking.pickupOtp}
-            </Text>
-          </View>
-          <View style={styles.otpDivider} />
-          <View style={styles.otpBlock}>
-            <Text style={styles.otpLabel}>Dropoff OTP</Text>
-            {isAtDropoff ? (
-              <Text style={styles.otpValue}>{activeBooking.deliveryOtp}</Text>
-            ) : (
-              <Text style={styles.otpMasked}>Wait for arrival</Text>
+        {activeBooking.status === 'awaiting_payment' ? (
+          <View style={styles.paymentCard}>
+            <View style={styles.paymentCardHeader}>
+              <Text style={styles.paymentCardEmoji}>💳</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.paymentCardTitle}>Delivery Complete — Pay Now</Text>
+                <Text style={styles.paymentCardAmount}>
+                  ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)}
+                </Text>
+              </View>
+            </View>
+
+            {activeBooking.paymentStatus !== 'customer_paid' && activeBooking.paymentStatus !== 'driver_confirmed' && (
+              <TouchableOpacity
+                style={styles.payUpiBtn}
+                onPress={async () => {
+                  const driverUpi = activeBooking.driverUpiId;
+                  if (!driverUpi) {
+                    Alert.alert('UPI not available', 'Driver has not set up their UPI ID. Please pay in cash.');
+                    return;
+                  }
+                  const amount = Math.round((activeBooking.fare?.totalInPaise || 0) / 100);
+                  const driverName = encodeURIComponent(activeBooking.driverName || 'Driver');
+                  const note = encodeURIComponent(`Sarthi-${activeBooking.id.slice(0, 8)}`);
+                  const upiUrl = `upi://pay?pa=${driverUpi}&pn=${driverName}&am=${amount}&cu=INR&tn=${note}`;
+                  try {
+                    const supported = await Linking.canOpenURL(upiUrl);
+                    if (!supported) {
+                      Alert.alert('No UPI App', `No UPI app found. Pay manually to ${driverUpi}, amount ₹${amount}`);
+                      return;
+                    }
+                    await Linking.openURL(upiUrl);
+                    setTimeout(() => {
+                      Alert.alert(
+                        'Did you complete the payment?',
+                        'Confirm only after payment is successful in your UPI app.',
+                        [
+                          { text: 'Not yet', style: 'cancel' },
+                          {
+                            text: 'Yes, I paid',
+                            onPress: async () => {
+                              try {
+                                await updateDoc(doc(db, 'bookings', activeBooking.id), {
+                                  paymentStatus: 'customer_paid',
+                                  customerPaidAt: new Date().toISOString(),
+                                });
+                              } catch (e) {
+                                Alert.alert('Error', e.message);
+                              }
+                            },
+                          },
+                        ]
+                      );
+                    }, 800);
+                  } catch (e) {
+                    Alert.alert('Error', e.message);
+                  }
+                }}
+              >
+                <Ionicons name="card-outline" size={18} color="#FFF" />
+                <Text style={styles.payUpiBtnText}>Pay ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)} via UPI</Text>
+              </TouchableOpacity>
+            )}
+
+            {activeBooking.paymentStatus === 'customer_paid' && (
+              <View style={styles.paidConfirmPill}>
+                <Ionicons name="time-outline" size={16} color="#92400E" />
+                <Text style={styles.paidConfirmText}>You marked as paid — waiting for driver to confirm</Text>
+              </View>
+            )}
+
+            {activeBooking.paymentStatus === 'driver_confirmed' && (
+              <View style={[styles.paidConfirmPill, { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }]}>
+                <Ionicons name="checkmark-circle" size={16} color="#065F46" />
+                <Text style={[styles.paidConfirmText, { color: '#065F46' }]}>Payment confirmed!</Text>
+              </View>
             )}
           </View>
-        </View>
+        ) : (
+          <View style={styles.otpCard}>
+            <View style={styles.otpBlock}>
+              <Text style={styles.otpLabel}>Pickup OTP</Text>
+              <Text style={[styles.otpValue, isPostPickup && { color: '#10B981' }]}>
+                {isPostPickup ? '✓' : activeBooking.pickupOtp}
+              </Text>
+            </View>
+            <View style={styles.otpDivider} />
+            <View style={styles.otpBlock}>
+              <Text style={styles.otpLabel}>Dropoff OTP</Text>
+              {isAtDropoff ? (
+                <Text style={styles.otpValue}>{activeBooking.deliveryOtp}</Text>
+              ) : (
+                <Text style={styles.otpMasked}>Wait for arrival</Text>
+              )}
+            </View>
+          </View>
+        )}
 
         {/* Driver details — shown after acceptance, hidden once trip ends */}
         {activeBooking.driverName &&
@@ -739,14 +900,26 @@ const styles = StyleSheet.create({
   horizontalVehicleScroll: { paddingBottom: 12, gap: 8, paddingRight: 16, paddingTop: 4 },
   vehicleCardHorizontal: { width: 60, paddingVertical: 10, paddingHorizontal: 4, backgroundColor: '#FFFFFF', borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#F3F4F6' },
   vehicleCardActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
-  vehicleIconCircle: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  vehicleIconCircle: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
   vehicleIconCircleActive: { backgroundColor: '#E5E7EB' },
   vName: { fontSize: 11, fontWeight: '700', color: '#4B5563', textAlign: 'center' },
   vNameActive: { color: '#111827' },
   vCap: { display: 'none' },
   vPrice: { fontSize: 11, fontWeight: '800', color: '#6B7280', marginTop: 2 },
   vPriceActive: { color: '#10B981' },
-  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 16, padding: 16, fontSize: 15, color: '#111827', marginBottom: 16 },
+  packageInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 13, color: '#111827', marginBottom: 12 },
+
+  // Vertical list rows
+  vehicleList: { gap: 6, marginBottom: 12 },
+  vehicleListRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 12 },
+  vehicleListRowActive: { borderColor: '#111827', backgroundColor: '#F9FAFB' },
+  vehicleListIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  vehicleListIconActive: { backgroundColor: '#E5E7EB' },
+  vehicleListName: { fontSize: 13, fontWeight: '700', color: '#374151' },
+  vehicleListNameActive: { color: '#111827' },
+  vehicleListCap: { fontSize: 11, color: '#9CA3AF', fontWeight: '500', marginTop: 1 },
+  vehicleListPrice: { fontSize: 13, fontWeight: '800', color: '#6B7280' },
+  vehicleListPriceActive: { color: '#10B981' },
   receiptBox: { backgroundColor: '#F9FAFB', borderRadius: 16, padding: 18, marginBottom: 16 },
   receiptRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   receiptLabel: { fontSize: 14, color: '#6B7280', fontWeight: '500' },
@@ -754,11 +927,21 @@ const styles = StyleSheet.create({
   receiptDivider: { height: 1, backgroundColor: '#E5E7EB', marginVertical: 8 },
   receiptTotalLabel: { fontSize: 15, fontWeight: '700', color: '#6B7280' },
   receiptTotalValue: { fontSize: 26, fontWeight: '900', color: '#111827' },
+  fareRangeNote: { fontSize: 11, color: '#6B7280', fontWeight: '500', marginTop: 6, fontStyle: 'italic' },
   activeHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   statusHeaderExpanded: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', padding: 16, borderRadius: 16, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
   statusText: { fontSize: 15, fontWeight: '800', color: '#10B981', flexShrink: 1 },
   minimizeBtn: { width: 48, height: 48, backgroundColor: '#F9FAFB', borderRadius: 24, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F3F4F6' },
   otpCard: { flexDirection: 'row', backgroundColor: '#FFFFFF', borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 1, borderColor: '#F3F4F6', shadowColor: '#000', shadowOpacity: 0.03, shadowRadius: 8, elevation: 2 },
+  paymentCard: { backgroundColor: '#FEF3C7', borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1.5, borderColor: '#FDE68A' },
+  paymentCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 14 },
+  paymentCardEmoji: { fontSize: 28 },
+  paymentCardTitle: { fontSize: 14, fontWeight: '800', color: '#92400E', letterSpacing: 0.2 },
+  paymentCardAmount: { fontSize: 28, fontWeight: '900', color: '#78350F', marginTop: 2, letterSpacing: -1 },
+  payUpiBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#10B981', borderRadius: 12, paddingVertical: 14, marginTop: 4 },
+  payUpiBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', letterSpacing: 0.3 },
+  paidConfirmPill: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FEF3C7', borderRadius: 10, padding: 12, marginTop: 10, borderWidth: 1, borderColor: '#FDE68A' },
+  paidConfirmText: { fontSize: 12, fontWeight: '700', color: '#92400E', flex: 1 },
   otpBlock: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   otpLabel: { fontSize: 12, color: '#9CA3AF', fontWeight: '700', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   otpValue: { fontSize: 26, color: '#111827', fontWeight: '900', letterSpacing: 3 },
@@ -767,11 +950,17 @@ const styles = StyleSheet.create({
   minimizedSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: Platform.OS === 'ios' ? 34 : 20, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
   minimizedRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   minimizedLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16, flex: 1, marginRight: 12, borderWidth: 1, borderColor: '#F3F4F6' },
-  actionButton: { height: 56, backgroundColor: '#111827', borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#111827', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 6 },
+  actionButton: { height: 46, backgroundColor: '#10B981', borderRadius: 12, alignItems: 'center', justifyContent: 'center', shadowColor: '#10B981', shadowOpacity: 0.2, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  payChipsRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  payChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#F9FAFB', borderRadius: 10, borderWidth: 1.5, borderColor: '#F3F4F6' },
+  payChipActive: { borderColor: '#111827', backgroundColor: '#FFFFFF' },
+  payChipEmoji: { fontSize: 14 },
+  payChipText: { fontSize: 13, fontWeight: '700', color: '#6B7280' },
+  payChipTextActive: { color: '#111827' },
   confirmLocBtn: { height: 44, backgroundColor: '#111827', borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   confirmLocText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.2 },
   disabledBtn: { backgroundColor: '#D1D5DB', shadowOpacity: 0 },
-  actionButtonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800' },
+  actionButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
   cancelBtn: { height: 52, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#FEE2E2', borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   driverCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FEF3C7', borderRadius: 16, marginBottom: 12 },
   driverAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#FDE68A', alignItems: 'center', justifyContent: 'center' },

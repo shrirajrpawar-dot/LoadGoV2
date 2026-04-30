@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -12,32 +12,64 @@ export default function DriverEarnings() {
   const { user, profile, driverDoc } = useAuth();
   const [completedBookings, setCompletedBookings] = useState([]);
   const [pendingCodCommission, setPendingCodCommission] = useState(0);
+  const [sarthiOwesDriver, setSarthiOwesDriver] = useState(0); // unsettled razorpay payouts
   const [loading, setLoading] = useState(true);
+  const [pageSize, setPageSize] = useState(30);
+  const [hasMore, setHasMore] = useState(false);
 
   const todayPaise = driverDoc?.earnings?.todayInPaise || 0;
   const totalPaise = driverDoc?.earnings?.totalInPaise || 0;
 
   useEffect(() => {
     if (!user?.uid) { setLoading(false); return; }
-    const q = query(
+
+    // Paged completed bookings — only what we need to render
+    const qPaged = query(
       collection(db, 'bookings'),
       where('driverId', '==', user.uid),
-      where('status', '==', 'completed')
+      where('status', '==', 'completed'),
+      limit(pageSize + 1) // one extra so we know if there's more
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      data.sort((a, b) => (b.completedAt?.toMillis?.() || 0) - (a.completedAt?.toMillis?.() || 0));
-      setCompletedBookings(data);
-
-      // Calculate pending COD commission
-      const pending = data
-        .filter((b) => b.paymentMethod === 'cod' && b.commission?.status === 'pending_from_driver')
-        .reduce((sum, b) => sum + (b.commission?.amountInPaise || 0), 0);
-      setPendingCodCommission(pending);
+    const unsubPaged = onSnapshot(qPaged, (snap) => {
+      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      all.sort((a, b) => (b.completedAt?.toMillis?.() || 0) - (a.completedAt?.toMillis?.() || 0));
+      setHasMore(all.length > pageSize);
+      setCompletedBookings(all.slice(0, pageSize));
       setLoading(false);
     });
-    return () => unsub();
-  }, [user?.uid]);
+
+    // Pending COD commission — narrow query so it stays cheap even with thousands of trips
+    const qPending = query(
+      collection(db, 'bookings'),
+      where('driverId', '==', user.uid),
+      where('commission.status', '==', 'pending_from_driver')
+    );
+    const unsubPending = onSnapshot(qPending, (snap) => {
+      const total = snap.docs.reduce((sum, d) => sum + (d.data().commission?.amountInPaise || 0), 0);
+      setPendingCodCommission(total);
+    });
+
+    // Unsettled Razorpay payouts — Sarthi owes driver these
+    // Booking is razorpay + completed + payoutStatus !== 'settled'
+    const qPayouts = query(
+      collection(db, 'bookings'),
+      where('driverId', '==', user.uid),
+      where('paymentMethod', '==', 'razorpay'),
+      where('status', '==', 'completed')
+    );
+    const unsubPayouts = onSnapshot(qPayouts, (snap) => {
+      const total = snap.docs.reduce((sum, d) => {
+        const data = d.data();
+        if (data.payoutStatus === 'settled') return sum; // already paid out
+        const fare = data.fare?.totalInPaise || 0;
+        const commission = data.commission?.amountInPaise || 0;
+        return sum + (fare - commission); // driver's earning
+      }, 0);
+      setSarthiOwesDriver(total);
+    });
+
+    return () => { unsubPaged(); unsubPending(); unsubPayouts(); };
+  }, [user?.uid, pageSize]);
 
   if (loading) {
     return (
@@ -67,6 +99,34 @@ export default function DriverEarnings() {
           <Text style={s.totalAmount}>₹{(totalPaise / 100).toFixed(0)}</Text>
         </View>
 
+        {/* Net Balance: Sarthi owes you - You owe Sarthi */}
+        {(sarthiOwesDriver > 0 || pendingCodCommission > 0) && (() => {
+          const net = sarthiOwesDriver - pendingCodCommission;
+          const positive = net >= 0;
+          return (
+            <View style={[s.balanceCard, positive ? s.balancePositive : s.balanceNegative]}>
+              <Text style={s.balanceLabel}>
+                {positive ? 'Sarthi owes you' : 'You owe Sarthi'}
+              </Text>
+              <Text style={[s.balanceAmount, positive ? s.balancePositiveTxt : s.balanceNegativeTxt]}>
+                ₹{Math.abs(Math.round(net / 100))}
+              </Text>
+              <View style={s.balanceBreakdown}>
+                {sarthiOwesDriver > 0 && (
+                  <Text style={s.balanceLine}>
+                    + ₹{Math.round(sarthiOwesDriver / 100)} unsettled UPI/card payouts
+                  </Text>
+                )}
+                {pendingCodCommission > 0 && (
+                  <Text style={s.balanceLine}>
+                    − ₹{Math.round(pendingCodCommission / 100)} commission you owe (cash collected)
+                  </Text>
+                )}
+              </View>
+            </View>
+          );
+        })()}
+
         {/* COD Commission Owed */}
         {pendingCodCommission > 0 && (
           <View style={s.codCard}>
@@ -80,19 +140,19 @@ export default function DriverEarnings() {
               </View>
             </View>
             <Text style={s.codDesc}>
-              You collected this in cash from customers. Please transfer this to LoadGo UPI:
+              You collected this in cash from customers. Please transfer this to Sarthi UPI:
             </Text>
             <View style={s.upiBox}>
-              <Text style={s.upiLabel}>LoadGo UPI ID</Text>
-              <Text style={s.upiId}>loadgo@upi</Text>
+              <Text style={s.upiLabel}>Sarthi UPI ID</Text>
+              <Text style={s.upiId}>sarthi@upi</Text>
             </View>
             <TouchableOpacity
               style={s.payNowBtn}
               onPress={() => {
                 const amount = (pendingCodCommission / 100).toFixed(2);
-                const upiUrl = `upi://pay?pa=loadgo@upi&pn=LoadGo&am=${amount}&cu=INR&tn=LoadGo%20Commission`;
+                const upiUrl = `upi://pay?pa=sarthi@upi&pn=Sarthi&am=${amount}&cu=INR&tn=Sarthi%20Commission`;
                 Linking.openURL(upiUrl).catch(() => {
-                  Alert.alert('UPI Not Found', 'Please pay manually to: loadgo@upi\nAmount: ₹' + amount);
+                  Alert.alert('UPI Not Found', 'Please pay manually to: sarthi@upi\nAmount: ₹' + amount);
                 });
               }}
             >
@@ -115,7 +175,9 @@ export default function DriverEarnings() {
         {completedBookings.length > 0 && (
           <View style={s.historySection}>
             <Text style={s.historyTitle}>Lifetime Bookings</Text>
-            <Text style={s.historySubtitle}>{completedBookings.length} completed deliveries</Text>
+            <Text style={s.historySubtitle}>
+              {hasMore ? `Showing ${completedBookings.length}` : `${completedBookings.length} completed deliveries`}
+            </Text>
 
             {completedBookings.map((b) => {
               const totalFare = (b.fare?.totalInPaise || 0) / 100;
@@ -172,6 +234,16 @@ export default function DriverEarnings() {
                 </View>
               );
             })}
+
+            {hasMore && (
+              <TouchableOpacity
+                style={s.loadMoreBtn}
+                onPress={() => setPageSize(pageSize + 30)}
+              >
+                <Ionicons name="chevron-down" size={16} color="#374151" />
+                <Text style={s.loadMoreText}>Load More</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
       </ScrollView>
@@ -254,7 +326,7 @@ function buildDriverReceiptHTML(b, driverName) {
   <div class="header">
     <div>
       <div class="brand-logo">L</div>
-      <div class="brand-name">LoadGo</div>
+      <div class="brand-name">Sarthi</div>
       <div class="brand-tag">Driver Earnings Receipt</div>
     </div>
     <div class="invoice-meta">
@@ -340,7 +412,7 @@ function buildDriverReceiptHTML(b, driverName) {
   </div>
 
   <div class="footer">
-    <div class="thanks">Thank you for delivering with LoadGo</div>
+    <div class="thanks">Thank you for delivering with Sarthi</div>
     <div class="footnote">Generated on ${escape(new Date().toLocaleString())}</div>
   </div>
 </body>
@@ -397,6 +469,15 @@ const s = StyleSheet.create({
   totalCard: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 18, alignItems: 'center', marginBottom: 16, borderWidth: 1, borderColor: '#F3F4F6', shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 8, elevation: 2 },
   totalLabel: { fontSize: 13, color: '#6B7280', fontWeight: '700', letterSpacing: 0.5, textTransform: 'uppercase' },
   totalAmount: { fontSize: 30, fontWeight: '800', color: '#111827', marginTop: 6 },
+  balanceCard: { borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1.5 },
+  balancePositive: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
+  balanceNegative: { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' },
+  balanceLabel: { fontSize: 12, fontWeight: '800', color: '#374151', letterSpacing: 0.4, textTransform: 'uppercase' },
+  balanceAmount: { fontSize: 30, fontWeight: '900', marginTop: 6, letterSpacing: -1 },
+  balancePositiveTxt: { color: '#065F46' },
+  balanceNegativeTxt: { color: '#92400E' },
+  balanceBreakdown: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.06)' },
+  balanceLine: { fontSize: 12, color: '#374151', fontWeight: '600', marginVertical: 2 },
 
   // COD Owed card — amber alert
   codCard: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#FCD34D', borderRadius: 16, padding: 16, marginBottom: 16 },
@@ -450,4 +531,6 @@ const s = StyleSheet.create({
   historyPayText: { fontSize: 11, fontWeight: '700', color: '#1F2937' },
   receiptBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#DBEAFE' },
   receiptBtnText: { fontSize: 12, fontWeight: '700', color: '#3B82F6' },
+  loadMoreBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 12, marginTop: 4, backgroundColor: '#FFFFFF', borderRadius: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  loadMoreText: { fontSize: 13, color: '#374151', fontWeight: '700' },
 });

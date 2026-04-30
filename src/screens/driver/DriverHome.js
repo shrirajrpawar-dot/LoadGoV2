@@ -9,11 +9,12 @@ import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  collection, query, where, onSnapshot,
+  collection, query, where, onSnapshot, limit,
   doc, updateDoc, getDoc, serverTimestamp, arrayUnion, addDoc,
 } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useAppSettings } from '../../hooks/useAppSettings';
 
 const { width, height } = Dimensions.get('window');
 
@@ -30,6 +31,7 @@ const VLABELS = {
 
 export default function DriverHome() {
   const { user, profile, driverDoc } = useAuth();
+  const { settings } = useAppSettings();
   const mapRef = useRef(null);
   
   const [isOnline, setIsOnline] = useState(false);
@@ -39,19 +41,56 @@ export default function DriverHome() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
+  const [driverLocation, setDriverLocation] = useState(null); // {lat, lng}
 
   // KYC status check
   const kycStatus = driverDoc?.kyc?.status || 'not_started';
   const isKycApproved = kycStatus === 'approved' || kycStatus === 'verified';
 
-  const currentBooking = myBookings.find(b => 
-    ['accepted', 'arrived', 'picked_up', 'reached_dropoff'].includes(b.status)
-  ) || null;
+  // Active states the driver still cares about (current trip)
+  const ACTIVE_STATES = ['accepted', 'arrived', 'picked_up', 'reached_dropoff', 'awaiting_payment'];
 
-  const availableBookings = allSearching.filter(b => 
-    b.vehicleType === driverDoc?.vehicle?.type && 
-    !(b.rejectedByDrivers || []).includes(user?.uid)
-  );
+  const currentBooking = myBookings.find(b => ACTIVE_STATES.includes(b.status)) || null;
+
+  // Haversine — straight-line distance in km
+  const haversineKm = (lat1, lng1, lat2, lng2) => {
+    if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
+    const R = 6371; // Earth radius in km
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  // Lookup vehicle config from settings (across both lists)
+  const findVehicleConfig = (vehicleId) => {
+    return (settings.parcelVehicles || []).find(v => v.id === vehicleId)
+        || (settings.rideVehicles || []).find(v => v.id === vehicleId)
+        || null;
+  };
+
+  // Decorate each available booking with distanceKm + driver pickup premium
+  const availableBookings = allSearching
+    .filter(b => !(b.rejectedByDrivers || []).includes(user?.uid))
+    .map(b => {
+      const dKm = (driverLocation && b.pickup?.lat)
+        ? haversineKm(driverLocation.lat, driverLocation.lng, b.pickup.lat, b.pickup.lng)
+        : null;
+      const vCfg = findVehicleConfig(b.vehicleType);
+      const freeKm = Number(vCfg?.pickupFreeKm) || 2;
+      const rate = Number(vCfg?.pickupKmRate) || 0;
+      const premium = (dKm != null) ? Math.round(Math.max(0, Math.min(dKm, Number(settings.searchRadiusKm) || 5) - freeKm) * rate) : null;
+      return { ...b, _distanceKm: dKm, _pickupPremium: premium };
+    })
+    .sort((a, b) => {
+      // Nearest first; bookings without distance go to the end
+      if (a._distanceKm == null && b._distanceKm == null) return 0;
+      if (a._distanceKm == null) return 1;
+      if (b._distanceKm == null) return -1;
+      return a._distanceKm - b._distanceKm;
+    });
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -60,17 +99,76 @@ export default function DriverHome() {
       if (snap.exists()) setIsOnline(snap.data().status === 'online');
     });
 
-    const unsubSearching = onSnapshot(query(collection(db, 'bookings'), where('status', '==', 'searching')), snap => {
-      setAllSearching(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    // Only run searching listener when driver is online AND has a vehicle type set.
+    // No vehicle type? skip — we'd download every searching booking otherwise.
+    let unsubSearching = () => {};
+    const myVehicleType = driverDoc?.vehicle?.type;
+    if (isOnline && myVehicleType) {
+      unsubSearching = onSnapshot(
+        query(
+          collection(db, 'bookings'),
+          where('status', '==', 'searching'),
+          where('vehicleType', '==', myVehicleType),
+          limit(20),
+        ),
+        snap => {
+          setAllSearching(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setLoading(false);
+        }
+      );
+    } else {
+      // Driver offline / no vehicle — clear list, don't subscribe
+      setAllSearching([]);
       setLoading(false);
-    });
+    }
 
-    const unsubMine = onSnapshot(query(collection(db, 'bookings'), where('driverId', '==', user.uid)), snap => {
-      setMyBookings(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    // Only watch the driver's own bookings that are still in flight.
+    // Past completed/cancelled bookings don't need a live listener — they live on the Earnings page.
+    const unsubMine = onSnapshot(
+      query(
+        collection(db, 'bookings'),
+        where('driverId', '==', user.uid),
+        where('status', 'in', [...ACTIVE_STATES, 'completed']),
+        limit(5),
+      ),
+      snap => {
+        setMyBookings(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }
+    );
 
     return () => { unsubDriver(); unsubSearching(); unsubMine(); };
-  }, [user?.uid]);
+  }, [user?.uid, isOnline, driverDoc?.vehicle?.type]);
+
+  // Live driver location: update Firestore every 30s while online (and not on a trip)
+  useEffect(() => {
+    if (!user?.uid || !isOnline) return;
+
+    let cancelled = false;
+
+    const updateLocationOnce = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (cancelled) return;
+        const coord = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setDriverLocation(coord);
+        await updateDoc(doc(db, 'drivers', user.uid), {
+          location: { ...coord, updatedAt: serverTimestamp() },
+        });
+      } catch (e) {
+        // silently ignore — driver might've revoked permission
+      }
+    };
+
+    updateLocationOnce(); // immediate
+    const interval = setInterval(updateLocationOnce, 30000); // every 30s
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.uid, isOnline]);
 
   useEffect(() => {
     const target = currentBooking || availableBookings[focusedIndex];
@@ -115,6 +213,30 @@ export default function DriverHome() {
     setActionLoading(false);
   };
 
+  const completeBooking = async (booking) => {
+    await updateDoc(doc(db, 'bookings', booking.id), {
+      status: 'completed',
+      completedAt: serverTimestamp(),
+    });
+
+    const totalFare = booking.fare?.totalInPaise || 0;
+    const commissionPct = booking.commission?.pct || 20;
+    const earnPaise = Math.round(totalFare * (100 - commissionPct) / 100);
+
+    const driverRef = doc(db, 'drivers', user.uid);
+    const driverSnap = await getDoc(driverRef);
+    const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
+
+    await updateDoc(driverRef, {
+      earnings: {
+        todayInPaise: (cur.todayInPaise || 0) + earnPaise,
+        totalInPaise: (cur.totalInPaise || 0) + earnPaise,
+      },
+    });
+
+    Alert.alert("Job Done!", `You earned ₹${Math.round(earnPaise / 100)}`);
+  };
+
   const verifyOtp = async (type) => {
     if (!currentBooking) return;
     const correct = type === 'pickup' ? currentBooking.pickupOtp : currentBooking.deliveryOtp;
@@ -125,30 +247,25 @@ export default function DriverHome() {
       if (type === 'pickup') {
         await updateDoc(doc(db, 'bookings', currentBooking.id), { status: 'picked_up' });
       } else {
-        // Mark booking completed
-        await updateDoc(doc(db, 'bookings', currentBooking.id), {
-          status: 'completed',
-          completedAt: serverTimestamp(),
-        });
+        // Check if UPI payment is pending before completing
+        const isUpi = currentBooking.paymentMethod === 'upi_direct' || currentBooking.paymentMethod === 'upi';
+        const isPaid = currentBooking.paymentStatus === 'driver_confirmed';
+        const isCod = currentBooking.paymentMethod === 'cod' || !currentBooking.paymentMethod;
 
-        // Calculate driver earning using booking's actual commission %
-        const totalFare = currentBooking.fare?.totalInPaise || 0;
-        const commissionPct = currentBooking.commission?.pct || 20;
-        const earnPaise = Math.round(totalFare * (100 - commissionPct) / 100);
-
-        // Read existing earnings, then increment
-        const driverRef = doc(db, 'drivers', user.uid);
-        const driverSnap = await getDoc(driverRef);
-        const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
-
-        await updateDoc(driverRef, {
-          earnings: {
-            todayInPaise: (cur.todayInPaise || 0) + earnPaise,
-            totalInPaise: (cur.totalInPaise || 0) + earnPaise,
-          },
-        });
-
-        Alert.alert("Job Done!", `You earned ₹${Math.round(earnPaise / 100)}`);
+        if (isUpi && !isPaid) {
+          // UPI not yet confirmed — park in awaiting_payment
+          await updateDoc(doc(db, 'bookings', currentBooking.id), {
+            status: 'awaiting_payment',
+            deliveryOtpVerifiedAt: serverTimestamp(),
+          });
+          Alert.alert(
+            "Delivery Verified!",
+            "Now confirm you've received the UPI payment to complete this trip."
+          );
+        } else {
+          // Cash or already-paid UPI or Razorpay — complete immediately
+          await completeBooking(currentBooking);
+        }
       }
       setOtpInput('');
     } catch (e) {
@@ -309,7 +426,81 @@ export default function DriverHome() {
               </TouchableOpacity>
             )}
             
-            {['accepted', 'picked_up'].includes(currentBooking.status) ? (
+            {/* Payment confirmation banner — UPI direct, customer marked paid but driver hasn't confirmed */}
+            {currentBooking.paymentMethod === 'upi_direct' &&
+             currentBooking.paymentStatus === 'customer_paid' && (
+              <View style={s.paymentBanner}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.paymentBannerTitle}>💳 Customer says they've paid via UPI</Text>
+                  <Text style={s.paymentBannerSub}>
+                    Check your UPI app for ₹{Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} from {currentBooking.customerName || 'customer'}.
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={s.paymentConfirmBtn}
+                  onPress={async () => {
+                    try {
+                      await updateDoc(doc(db, 'bookings', currentBooking.id), {
+                        paymentStatus: 'driver_confirmed',
+                        paymentConfirmedAt: serverTimestamp(),
+                      });
+                      Alert.alert('✓ Payment Confirmed', 'Marked as received.');
+                    } catch (e) {
+                      Alert.alert('Error', e.message);
+                    }
+                  }}
+                >
+                  <Text style={s.paymentConfirmBtnTxt}>I Got It</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* If UPI booking and customer hasn't yet marked paid, remind driver */}
+            {currentBooking.paymentMethod === 'upi_direct' &&
+             !currentBooking.paymentStatus && (
+              <View style={s.paymentBannerInfo}>
+                <Text style={s.paymentBannerSub}>
+                  ℹ️ This is a UPI booking. Customer will pay you directly when ready.
+                </Text>
+              </View>
+            )}
+
+            {currentBooking.status === 'awaiting_payment' ? (
+              <View>
+                <View style={s.awaitingPaymentCard}>
+                  <Text style={s.awaitingPaymentTitle}>📦 Delivery Verified!</Text>
+                  <Text style={s.awaitingPaymentSub}>
+                    Collect ₹{Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} via UPI from {currentBooking.customerName || 'customer'}.
+                  </Text>
+                  <Text style={s.awaitingPaymentHint}>
+                    Ask customer to pay your UPI ID. Once you receive the money, tap below.
+                  </Text>
+                </View>
+                {currentBooking.paymentStatus === 'customer_paid' && (
+                  <View style={s.paymentBanner}>
+                    <Text style={s.paymentBannerTitle}>✅ Customer says they've paid!</Text>
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={[s.btn, { backgroundColor: '#10B981' }]}
+                  onPress={async () => {
+                    setActionLoading(true);
+                    try {
+                      await updateDoc(doc(db, 'bookings', currentBooking.id), {
+                        paymentStatus: 'driver_confirmed',
+                        paymentConfirmedAt: serverTimestamp(),
+                      });
+                      await completeBooking(currentBooking);
+                    } catch (e) {
+                      Alert.alert('Error', e.message);
+                    }
+                    setActionLoading(false);
+                  }}
+                >
+                  {actionLoading ? <ActivityIndicator color="#fff" /> : <Text style={s.btnTxt}>PAYMENT RECEIVED — COMPLETE TRIP</Text>}
+                </TouchableOpacity>
+              </View>
+            ) : ['accepted', 'picked_up'].includes(currentBooking.status) ? (
               <TouchableOpacity style={s.btn} onPress={() => updateBookingStatus(currentBooking.status === 'accepted' ? 'arrived' : 'reached_dropoff')}>
                 <Text style={s.btnTxt}>I HAVE ARRIVED</Text>
               </TouchableOpacity>
@@ -349,13 +540,20 @@ export default function DriverHome() {
                 onScroll={e => setFocusedIndex(Math.round(e.nativeEvent.contentOffset.x / width))} 
                 keyExtractor={(item) => item.id}
                 renderItem={({item}) => {
-                  const distanceKm = item.distanceKm ? Number(item.distanceKm).toFixed(1) : null;
+                  const tripKm = item.distanceKm ? Number(item.distanceKm).toFixed(1) : null;
+                  const pickupKm = item._distanceKm != null ? item._distanceKm.toFixed(1) : null;
+                  const pickupPremium = item._pickupPremium;
                   const isCod = item.paymentMethod === 'cod';
+                  // Driver's actual fare = base + distance + THEIR pickup premium (not customer's max)
+                  const baseFare = (item.fare?.baseFare || 0) / 100;
+                  const distanceFare = (item.fare?.distanceFare || 0) / 100;
+                  const driverPremium = item._pickupPremium || 0;
+                  const actualFare = Math.round(baseFare + distanceFare + driverPremium);
                   return (
                     <View style={s.card}>
                       <View style={s.cardTopRow}>
                         <View style={{ flex: 1 }}>
-                          <Text style={s.price}>₹{Math.round((item.fare?.totalInPaise || 0)/100)}</Text>
+                          <Text style={s.price}>₹{actualFare}</Text>
                           <Text style={s.reqTitle}>{VLABELS[item.vehicleType] || 'Delivery Request'}</Text>
                         </View>
                         <View style={[s.payTag, isCod ? s.payTagCod : s.payTagUpi]}>
@@ -365,8 +563,24 @@ export default function DriverHome() {
 
                       <View style={s.metaRow}>
                         <Text style={s.metaText}>👤 {item.customerName || 'Customer'}</Text>
-                        {distanceKm && <Text style={s.metaText}>📏 {distanceKm} km</Text>}
+                        {tripKm && <Text style={s.metaText}>🛣️ Trip {tripKm} km</Text>}
                       </View>
+
+                      {/* Driver-to-pickup distance + pickup premium they'd earn */}
+                      {pickupKm != null && (
+                        <View style={s.pickupInfoRow}>
+                          <View style={s.pickupChip}>
+                            <Ionicons name="navigate-outline" size={13} color="#1E40AF" />
+                            <Text style={s.pickupChipText}>{pickupKm} km to pickup</Text>
+                          </View>
+                          {pickupPremium > 0 && (
+                            <View style={[s.pickupChip, { backgroundColor: '#ECFDF5' }]}>
+                              <Ionicons name="cash-outline" size={13} color="#065F46" />
+                              <Text style={[s.pickupChipText, { color: '#065F46' }]}>+₹{pickupPremium} pickup</Text>
+                            </View>
+                          )}
+                        </View>
+                      )}
 
                       <View style={s.addressBlock}>
                         <View style={s.addressRow}>
@@ -404,6 +618,7 @@ export default function DriverHome() {
                             driverId: user.uid,
                             driverName: driverDoc?.kyc?.fullName || profile?.name || 'Driver',
                             driverPhone: profile?.phone || '',
+                            driverUpiId: driverDoc?.kyc?.upiId || '',
                             driverVehicleLabel: driverDoc?.vehicle?.label || '',
                             driverVehicleNumber: driverDoc?.vehicle?.number || '',
                             driverVehicleModel: driverDoc?.vehicle?.model || '',
@@ -464,6 +679,16 @@ const s = StyleSheet.create({
   addressText: { fontSize: 14, color: '#444', marginBottom: 8 },
   btn: { backgroundColor: '#000', padding: 18, borderRadius: 12, alignItems: 'center', marginTop: 10 },
   btnTxt: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  paymentBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, backgroundColor: '#ECFDF5', borderRadius: 12, borderWidth: 1, borderColor: '#A7F3D0', marginBottom: 12 },
+  paymentBannerInfo: { padding: 10, backgroundColor: '#EFF6FF', borderRadius: 10, borderWidth: 1, borderColor: '#DBEAFE', marginBottom: 12 },
+  paymentBannerTitle: { fontSize: 13, fontWeight: '800', color: '#065F46', marginBottom: 2 },
+  paymentBannerSub: { fontSize: 11, color: '#374151', fontWeight: '500' },
+  paymentConfirmBtn: { backgroundColor: '#10B981', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
+  paymentConfirmBtnTxt: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
+  awaitingPaymentCard: { backgroundColor: '#FEF3C7', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FDE68A', marginBottom: 14 },
+  awaitingPaymentTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
+  awaitingPaymentSub: { fontSize: 14, fontWeight: '700', color: '#78350F', marginBottom: 6 },
+  awaitingPaymentHint: { fontSize: 12, fontWeight: '500', color: '#92400E' },
   navBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', paddingVertical: 13, borderRadius: 12, marginTop: 10 },
   navBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14, letterSpacing: 0.2 },
   input: { borderBottomWidth: 2, borderColor: '#eee', padding: 10, textAlign: 'center', fontSize: 24, fontWeight: 'bold', marginBottom: 10 },
@@ -477,6 +702,9 @@ const s = StyleSheet.create({
   payTagText: { fontSize: 12, fontWeight: '700', color: '#1F2937' },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, marginBottom: 10 },
   metaText: { fontSize: 13, color: '#4B5563', fontWeight: '600' },
+  pickupInfoRow: { flexDirection: 'row', gap: 8, marginBottom: 10, flexWrap: 'wrap' },
+  pickupChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#EFF6FF', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  pickupChipText: { fontSize: 12, fontWeight: '700', color: '#1E40AF' },
   addressBlock: { backgroundColor: '#F9FAFB', borderRadius: 12, padding: 12, marginBottom: 10 },
   addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   greenDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#10B981', marginTop: 5 },

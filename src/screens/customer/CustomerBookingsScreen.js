@@ -7,11 +7,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
+import { useAppSettings } from '../../hooks/useAppSettings';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../../../firebase';
+import { doc, updateDoc } from 'firebase/firestore';
 
-const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'in_progress', 'at_drop'];
+const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'arrived', 'in_progress', 'picked_up', 'at_drop', 'reached_dropoff', 'awaiting_payment'];
 
 function callPhone(phone) {
   if (!phone) return;
@@ -95,7 +99,7 @@ function buildInvoiceHTML(booking) {
   <div class="header">
     <div class="brand-block">
       <div class="brand-logo">L</div>
-      <div class="brand-name">LoadGo</div>
+      <div class="brand-name">Sarthi</div>
       <div class="brand-tag">Fast Delivery, Anywhere</div>
     </div>
     <div class="invoice-meta">
@@ -165,8 +169,8 @@ function buildInvoiceHTML(booking) {
   </div>
 
   <div class="footer">
-    <div class="thanks">Thank you for choosing LoadGo</div>
-    <div class="footnote">For support, contact us at support@loadgo.app</div>
+    <div class="thanks">Thank you for choosing Sarthi</div>
+    <div class="footnote">For support, contact us at support@sarthi.app</div>
   </div>
 </body>
 </html>
@@ -182,7 +186,7 @@ async function shareReceipt(booking) {
     if (isAvailable) {
       await Sharing.shareAsync(uri, {
         mimeType: 'application/pdf',
-        dialogTitle: `LoadGo Receipt - ${booking.id.substring(0, 8)}`,
+        dialogTitle: `Sarthi Receipt - ${booking.id.substring(0, 8)}`,
         UTI: 'com.adobe.pdf',
       });
     } else {
@@ -195,8 +199,11 @@ async function shareReceipt(booking) {
 
 export default function CustomerBookingsScreen() {
   const { user } = useAuth();
+  const { settings } = useAppSettings();
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [pageSize, setPageSize] = useState(30);
+  const [hasMore, setHasMore] = useState(false);
   const prevBookingsRef = useRef({});
 
   useEffect(() => {
@@ -204,16 +211,19 @@ export default function CustomerBookingsScreen() {
 
     const q = query(
       collection(db, 'bookings'),
-      where('customerId', '==', user.uid)
+      where('customerId', '==', user.uid),
+      limit(pageSize + 1)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-      data.sort((a, b) => {
+      const all = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      all.sort((a, b) => {
         const ta = a.createdAt?.toMillis?.() || 0;
         const tb = b.createdAt?.toMillis?.() || 0;
         return tb - ta;
       });
+      setHasMore(all.length > pageSize);
+      const data = all.slice(0, pageSize);
 
       // Check for new driver accepted notifications
       data.forEach((booking) => {
@@ -238,7 +248,7 @@ export default function CustomerBookingsScreen() {
     });
 
     return () => unsubscribe();
-  }, [user?.uid]);
+  }, [user?.uid, pageSize]);
 
   if (loading) {
     return (
@@ -277,7 +287,9 @@ export default function CustomerBookingsScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>My Bookings</Text>
-        <Text style={styles.subtitle}>{bookings.length} total</Text>
+        <Text style={styles.subtitle}>
+          {hasMore ? `Showing ${bookings.length}` : `${bookings.length} total`}
+        </Text>
       </View>
       <SectionList
         sections={sections}
@@ -286,14 +298,88 @@ export default function CustomerBookingsScreen() {
         renderSectionHeader={({ section }) => (
           <Text style={styles.sectionHeader}>{section.title}</Text>
         )}
-        renderItem={({ item }) => <BookingCard booking={item} />}
+        renderItem={({ item }) => <BookingCard booking={item} settings={settings} />}
         stickySectionHeadersEnabled={false}
+        ListFooterComponent={hasMore ? (
+          <TouchableOpacity
+            style={styles.loadMoreBtn}
+            onPress={() => setPageSize(pageSize + 30)}
+          >
+            <Ionicons name="chevron-down" size={16} color="#374151" />
+            <Text style={styles.loadMoreText}>Load More</Text>
+          </TouchableOpacity>
+        ) : null}
       />
     </SafeAreaView>
   );
 }
 
-function BookingCard({ booking }) {
+function BookingCard({ booking, settings }) {
+  const [paying, setPaying] = useState(false);
+
+  const handleUpiDirectPay = async () => {
+    const driverUpi = booking.driverUpiId;
+    if (!driverUpi) {
+      Alert.alert('UPI not available', 'Driver has not set up their UPI ID. Please pay in cash.');
+      return;
+    }
+    const amount = Math.round((booking.fare?.totalInPaise || 0) / 100);
+    const driverName = encodeURIComponent(booking.driverName || 'Driver');
+    const note = encodeURIComponent(`Sarthi-${booking.id.slice(0, 8)}`);
+    const upiUrl = `upi://pay?pa=${driverUpi}&pn=${driverName}&am=${amount}&cu=INR&tn=${note}`;
+    try {
+      const supported = await Linking.canOpenURL(upiUrl);
+      if (!supported) {
+        Alert.alert('No UPI App', `No UPI app installed. Pay manually to ${driverUpi}, amount ₹${amount}`);
+        return;
+      }
+      await Linking.openURL(upiUrl);
+      // After returning to the app, prompt customer to confirm
+      setTimeout(() => {
+        Alert.alert(
+          'Did you complete the payment?',
+          'Please confirm only after payment is successful in your UPI app.',
+          [
+            { text: 'Not yet', style: 'cancel' },
+            {
+              text: 'Yes, paid',
+              onPress: async () => {
+                try {
+                  await updateDoc(doc(db, 'bookings', booking.id), {
+                    paymentStatus: 'customer_paid',
+                    customerPaidAt: new Date().toISOString(),
+                  });
+                } catch (e) {
+                  Alert.alert('Error', 'Could not mark as paid: ' + e.message);
+                }
+              },
+            },
+          ]
+        );
+      }, 800);
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
+  const handleRazorpayPay = async () => {
+    setPaying(true);
+    try {
+      const createOrder = httpsCallable(functions, 'createRazorpayOrder');
+      const result = await createOrder({ bookingId: booking.id });
+      const { orderId, amount, keyId } = result.data;
+      // PLACEHOLDER: actual Razorpay checkout via WebView/SDK goes here
+      Alert.alert(
+        'Razorpay Coming Soon',
+        `Order created (ID: ${orderId}). Real Razorpay checkout requires the react-native-razorpay package or WebView integration. Once added, this will open the Razorpay payment page with amount ₹${amount / 100}.`
+      );
+    } catch (e) {
+      Alert.alert('Razorpay Error', e.message || 'Could not create order. Make sure Razorpay is configured in admin settings and Firebase Functions config.');
+    } finally {
+      setPaying(false);
+    }
+  };
+
   const getStatusInfo = () => {
     if (isBookingExpired(booking)) {
       return { color: '#EF4444', label: 'Expired (No Driver Found)', icon: 'time-outline' };
@@ -301,9 +387,13 @@ function BookingCard({ booking }) {
     switch (booking.status) {
       case 'searching': return { color: '#3B82F6', label: 'Finding Driver', icon: 'search-outline' };
       case 'accepted': return { color: '#F59E0B', label: 'Driver Coming to Pickup', icon: 'car-outline' };
-      case 'at_pickup': return { color: '#8B5CF6', label: 'Driver at Pickup', icon: 'location-outline' };
-      case 'in_progress': return { color: '#10B981', label: 'On the Way', icon: 'navigate-outline' };
-      case 'at_drop': return { color: '#10B981', label: 'Driver at Drop', icon: 'flag-outline' };
+      case 'at_pickup':
+      case 'arrived': return { color: '#8B5CF6', label: 'Driver at Pickup', icon: 'location-outline' };
+      case 'in_progress':
+      case 'picked_up': return { color: '#10B981', label: 'On the Way', icon: 'navigate-outline' };
+      case 'at_drop':
+      case 'reached_dropoff': return { color: '#10B981', label: 'Driver at Drop', icon: 'flag-outline' };
+      case 'awaiting_payment': return { color: '#F59E0B', label: 'Payment Pending', icon: 'wallet-outline' };
       case 'completed': return { color: '#10B981', label: 'Delivered', icon: 'checkmark-circle' };
       case 'cancelled': return { color: '#EF4444', label: 'Cancelled', icon: 'close-circle' };
       default: return { color: '#9CA3AF', label: booking.status, icon: 'ellipse-outline' };
@@ -379,8 +469,46 @@ function BookingCard({ booking }) {
         </View>
       )}
 
-      {/* PICKUP OTP */}
-      {booking.status === 'at_pickup' && booking.pickupOtp && (
+      {/* Payment Action — OUTSIDE driverBox so it always shows */}
+      {ACTIVE_STATUSES.includes(booking.status) &&
+       booking.status !== 'searching' &&
+       booking.paymentStatus !== 'customer_paid' &&
+       booking.paymentStatus !== 'driver_confirmed' &&
+       (booking.paymentMethod === 'upi_direct' || booking.paymentMethod === 'upi') && (
+        <TouchableOpacity style={styles.payBtn} onPress={handleUpiDirectPay}>
+          <Ionicons name="card-outline" size={16} color="#FFF" />
+          <Text style={styles.payBtnText}>
+            Pay ₹{Math.round((booking.fare?.totalInPaise || 0) / 100)} via UPI
+          </Text>
+        </TouchableOpacity>
+      )}
+      {ACTIVE_STATUSES.includes(booking.status) &&
+       booking.paymentMethod === 'razorpay' &&
+       booking.paymentStatus !== 'driver_confirmed' && (
+        <TouchableOpacity style={styles.payBtn} onPress={handleRazorpayPay} disabled={paying}>
+          <Ionicons name="card-outline" size={16} color="#FFF" />
+          <Text style={styles.payBtnText}>
+            {paying ? 'Processing...' : `Pay ₹${Math.round((booking.fare?.totalInPaise || 0) / 100)} via Razorpay`}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {/* "Customer marked as paid" indicator */}
+      {booking.paymentStatus === 'customer_paid' && (
+        <View style={styles.paidPill}>
+          <Ionicons name="time-outline" size={14} color="#92400E" />
+          <Text style={styles.paidPillText}>You marked as paid — awaiting driver confirmation</Text>
+        </View>
+      )}
+      {booking.paymentStatus === 'driver_confirmed' && (
+        <View style={[styles.paidPill, { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }]}>
+          <Ionicons name="checkmark-circle" size={14} color="#065F46" />
+          <Text style={[styles.paidPillText, { color: '#065F46' }]}>Payment confirmed</Text>
+        </View>
+      )}
+
+      {/* PICKUP OTP — driver has arrived at pickup */}
+      {(booking.status === 'at_pickup' || booking.status === 'arrived') && booking.pickupOtp && (
         <View style={[styles.otpBox, { borderColor: '#3B82F6', backgroundColor: '#EFF6FF' }]}>
           <Text style={[styles.otpStage, { color: '#3B82F6' }]}>STAGE 1 OF 2</Text>
           <Text style={[styles.otpLabel, { color: '#3B82F6' }]}>PICKUP OTP</Text>
@@ -391,8 +519,8 @@ function BookingCard({ booking }) {
         </View>
       )}
 
-      {/* DELIVERY OTP */}
-      {booking.status === 'at_drop' && booking.deliveryOtp && (
+      {/* DELIVERY OTP — driver has reached dropoff */}
+      {(booking.status === 'at_drop' || booking.status === 'reached_dropoff') && booking.deliveryOtp && (
         <View style={[styles.otpBox, { borderColor: '#10B981', backgroundColor: '#ECFDF5' }]}>
           <Text style={[styles.otpStage, { color: '#10B981' }]}>STAGE 2 OF 2</Text>
           <Text style={[styles.otpLabel, { color: '#10B981' }]}>DELIVERY OTP</Text>
@@ -400,6 +528,29 @@ function BookingCard({ booking }) {
           <Text style={[styles.otpHint, { color: '#10B981' }]}>
             Tell this code to the driver to complete delivery
           </Text>
+        </View>
+      )}
+
+      {/* AWAITING PAYMENT — delivery verified, now pay the driver */}
+      {booking.status === 'awaiting_payment' && (
+        <View style={[styles.otpBox, { borderColor: '#F59E0B', backgroundColor: '#FEF3C7' }]}>
+          <Text style={[styles.otpStage, { color: '#92400E' }]}>DELIVERY COMPLETE</Text>
+          <Text style={[styles.otpLabel, { color: '#92400E' }]}>💳 PAY THE DRIVER</Text>
+          <Text style={[styles.otpHint, { color: '#78350F', marginTop: 6, fontSize: 13, fontWeight: '600' }]}>
+            Your delivery is verified. Please pay ₹{Math.round((booking.fare?.totalInPaise || 0) / 100)} to the driver via UPI.
+          </Text>
+          {booking.paymentStatus !== 'customer_paid' && booking.paymentStatus !== 'driver_confirmed' && (
+            <Text style={[styles.otpHint, { color: '#92400E', marginTop: 4 }]}>
+              Tap the "Pay via UPI" button to complete payment.
+            </Text>
+          )}
+          {booking.paymentStatus === 'customer_paid' && (
+            <View style={{ marginTop: 10, backgroundColor: '#ECFDF5', padding: 10, borderRadius: 10 }}>
+              <Text style={{ color: '#065F46', fontSize: 13, fontWeight: '700', textAlign: 'center' }}>
+                ✅ You've marked as paid — waiting for driver to confirm
+              </Text>
+            </View>
+          )}
         </View>
       )}
 
@@ -461,6 +612,10 @@ const styles = StyleSheet.create({
   driverLabel: { fontSize: 10, fontWeight: '800', color: '#92400E', letterSpacing: 0.5 },
   driverName: { fontSize: 15, fontWeight: '700', color: '#111827', marginTop: 2 },
   callBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#10B981', borderRadius: 10, paddingVertical: 10, marginTop: 12 },
+  payBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', borderRadius: 10, paddingVertical: 12, marginTop: 8, shadowColor: '#3B82F6', shadowOpacity: 0.2, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  payBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
+  paidPill: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#FEF3C7', borderRadius: 10, paddingVertical: 8, marginTop: 8, borderWidth: 1, borderColor: '#FDE68A' },
+  paidPillText: { color: '#92400E', fontSize: 12, fontWeight: '700' },
   callBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
 
   otpBox: { borderWidth: 2, borderRadius: 14, padding: 16, marginTop: 12, alignItems: 'center' },
@@ -474,4 +629,6 @@ const styles = StyleSheet.create({
 
   shareReceiptBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 10, paddingVertical: 12, backgroundColor: '#EFF6FF', borderRadius: 12, borderWidth: 1, borderColor: '#DBEAFE' },
   shareReceiptText: { fontSize: 14, fontWeight: '700', color: '#3B82F6' },
+  loadMoreBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 14, marginTop: 4, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#F3F4F6' },
+  loadMoreText: { fontSize: 13, color: '#374151', fontWeight: '700' },
 });

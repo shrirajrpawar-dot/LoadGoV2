@@ -26,6 +26,10 @@ export default function ProfileScreen() {
   const [aadharNum, setAadharNum] = useState('');
   const [licenseNum, setLicenseNum] = useState('');
   const [panNum, setPanNum] = useState('');
+  const [bankIfsc, setBankIfsc] = useState('');
+  const [bankAccountNumber, setBankAccountNumber] = useState('');
+  const [bankAccountHolderName, setBankAccountHolderName] = useState('');
+  const [upiId, setUpiId] = useState('');
   const [vehicleType, setVehicleType] = useState('bike');
   const [vehicleModel, setVehicleModel] = useState('');
   const [vehicleNumber, setVehicleNumber] = useState('');
@@ -50,6 +54,10 @@ export default function ProfileScreen() {
         setAadharNum(data.kyc?.aadharNumber || '');
         setLicenseNum(data.kyc?.licenseNumber || '');
         setPanNum(data.kyc?.panNumber || '');
+        setBankIfsc(data.kyc?.bank?.ifsc || '');
+        setBankAccountNumber(data.kyc?.bank?.accountNumber || '');
+        setBankAccountHolderName(data.kyc?.bank?.accountHolderName || '');
+        setUpiId(data.kyc?.upiId || '');
         setVehicleType(data.vehicle?.type || 'bike');
         setVehicleModel(data.vehicle?.model || '');
         setVehicleNumber(data.vehicle?.number || '');
@@ -143,6 +151,17 @@ export default function ProfileScreen() {
     if (!panNum.trim() || !/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/i.test(panNum.trim())) {
       Alert.alert('Required', 'Enter valid PAN (format: ABCDE1234F)'); return;
     }
+    if (!bankAccountHolderName.trim()) { Alert.alert('Required', 'Enter bank account holder name'); return; }
+    if (!bankIfsc.trim() || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(bankIfsc.trim().toUpperCase())) {
+      Alert.alert('Required', 'Enter valid IFSC (e.g. HDFC0001234)'); return;
+    }
+    if (!bankAccountNumber.trim() || !/^[0-9]{9,18}$/.test(bankAccountNumber.trim())) {
+      Alert.alert('Required', 'Enter valid account number (9–18 digits)'); return;
+    }
+    // UPI ID is optional; if entered, validate format
+    if (upiId.trim() && !/^[a-z0-9._-]+@[a-z]+$/i.test(upiId.trim())) {
+      Alert.alert('Invalid UPI', 'UPI ID must be in format: name@bank (e.g. 9876543210@paytm)'); return;
+    }
     if (!vehicleModel.trim()) { Alert.alert('Required', 'Enter vehicle model'); return; }
     if (!vehicleNumber.trim()) { Alert.alert('Required', 'Enter vehicle number'); return; }
     if (!aadharPhoto) { Alert.alert('Required', 'Upload Aadhar photo'); return; }
@@ -191,6 +210,12 @@ export default function ProfileScreen() {
         'kyc.aadharNumber': aadharNum,
         'kyc.licenseNumber': licenseNum,
         'kyc.panNumber': panNum.toUpperCase(),
+        'kyc.bank': {
+          ifsc: bankIfsc.trim().toUpperCase(),
+          accountNumber: bankAccountNumber.trim(),
+          accountHolderName: bankAccountHolderName.trim(),
+        },
+        'kyc.upiId': upiId.trim().toLowerCase(),
         'kyc.aadharPhoto': aadharUrl,
         'kyc.licensePhoto': licenseUrl,
         'kyc.panPhoto': panUrl,
@@ -444,6 +469,28 @@ export default function ProfileScreen() {
               <DocBtn label="PAN Card" photo={panPhoto} onPress={() => handleUploadDoc(setPanPhoto)} disabled={isApproved && !isEditingKyc} />
               <DocBtn label="Driving License" photo={licensePhoto} onPress={() => handleUploadDoc(setLicensePhoto)} disabled={isApproved && !isEditingKyc} />
               <DocBtn label="Vehicle RC" photo={rcPhoto} onPress={() => handleUploadDoc(setRcPhoto)} disabled={isApproved && !isEditingKyc} />
+            </View>
+
+            <Text style={st.sectionLabel}>Bank Details</Text>
+            <View style={st.section}>
+              <Input label="Account Holder Name" value={bankAccountHolderName} onChangeText={setBankAccountHolderName} editable={!isApproved || isEditingKyc} placeholder="As per bank records" />
+              <Input label="Account Number" value={bankAccountNumber} onChangeText={(t) => setBankAccountNumber(t.replace(/[^0-9]/g, ''))} keyboardType="numeric" maxLength={18} editable={!isApproved || isEditingKyc} placeholder="9 to 18 digits" />
+              <Input label="IFSC Code" value={bankIfsc} onChangeText={(t) => setBankIfsc(t.toUpperCase())} maxLength={11} editable={!isApproved || isEditingKyc} placeholder="HDFC0001234" />
+            </View>
+
+            <Text style={st.sectionLabel}>UPI ID (for receiving customer payments)</Text>
+            <View style={st.section}>
+              <Input
+                label="Your UPI ID"
+                value={upiId}
+                onChangeText={(t) => setUpiId(t.toLowerCase().replace(/[^a-z0-9._@-]/g, ''))}
+                editable={!isApproved || isEditingKyc}
+                placeholder="9876543210@paytm or yourname@upi"
+                autoCapitalize="none"
+              />
+              <Text style={{ fontSize: 11, color: '#6B7280', fontWeight: '500', marginTop: -8, marginBottom: 8 }}>
+                Customers paying via UPI will send money to this ID. Optional, but required to accept UPI bookings.
+              </Text>
             </View>
 
             {kycStatus !== 'approved' && (
