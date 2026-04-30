@@ -313,7 +313,7 @@ export default function CustomerHome() {
         pickup: pickupLocation, drop: dropLocation,
         itemsDescription: serviceType === 'parcel' ? itemsDescription.trim() : '',
         paymentMethod, distanceKm: fareQuote.distanceKm, fare: fareQuote.fare,
-        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'cod' ? 'pending_from_driver' : 'collected' },
+        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'razorpay' ? 'collected' : 'pending_from_driver' },
         // Payment status: cod gets confirmed at delivery; upi/razorpay before
         paymentStatus: 'pending', // pending → customer_paid → driver_confirmed
         status: 'searching', 

@@ -4,7 +4,7 @@ import {
   onAuthStateChanged,
   signOut as firebaseSignOut,
 } from 'firebase/auth';
-import { doc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../../firebase';
 
 const AuthContext = createContext();
@@ -87,17 +87,22 @@ export function AuthProvider({ children }) {
       isDriver: true,
       mode: 'driver',
     });
-    await setDoc(doc(db, 'drivers', user.uid), {
-      uid: user.uid,
-      name: profile?.name || '',
-      phone: profile?.phone || '',
-      email: profile?.email || '',
-      status: 'offline',
-      earnings: { todayInPaise: 0, totalInPaise: 0 },
-      kyc: { status: 'not_started' },
-      vehicle: {},
-      createdAt: new Date().toISOString(),
-    }, { merge: true });
+    // Only create driver doc if it doesn't exist — don't overwrite earnings/KYC
+    const driverRef = doc(db, 'drivers', user.uid);
+    const driverSnap = await getDoc(driverRef);
+    if (!driverSnap.exists()) {
+      await setDoc(driverRef, {
+        uid: user.uid,
+        name: profile?.name || '',
+        phone: profile?.phone || '',
+        email: profile?.email || '',
+        status: 'offline',
+        earnings: { todayInPaise: 0, totalInPaise: 0 },
+        kyc: { status: 'not_started' },
+        vehicle: {},
+        createdAt: new Date().toISOString(),
+      });
+    }
   };
 
   const switchMode = async (newMode) => {

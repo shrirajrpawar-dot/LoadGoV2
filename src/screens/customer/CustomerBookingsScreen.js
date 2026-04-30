@@ -7,13 +7,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit, orderBy, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../../../firebase';
-import { doc, updateDoc } from 'firebase/firestore';
 
 const ACTIVE_STATUSES = ['searching', 'accepted', 'at_pickup', 'arrived', 'in_progress', 'picked_up', 'at_drop', 'reached_dropoff', 'awaiting_payment'];
 
@@ -224,16 +223,12 @@ export default function CustomerBookingsScreen() {
     const q = query(
       collection(db, 'bookings'),
       where('customerId', '==', user.uid),
+      orderBy('createdAt', 'desc'),
       limit(pageSize + 1)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const all = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-      all.sort((a, b) => {
-        const ta = a.createdAt?.toMillis?.() || 0;
-        const tb = b.createdAt?.toMillis?.() || 0;
-        return tb - ta;
-      });
       setHasMore(all.length > pageSize);
       const data = all.slice(0, pageSize);
 

@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import {
   collection, query, where, onSnapshot, limit,
   doc, updateDoc, getDoc, serverTimestamp, arrayUnion, addDoc,
+  runTransaction, increment,
 } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
@@ -144,7 +145,8 @@ export default function DriverHome() {
     return () => { unsubDriver(); unsubSearching(); unsubMine(); };
   }, [user?.uid, isOnline, driverDoc?.vehicle?.type]);
 
-  // Live driver location: update Firestore every 30s while online (and not on a trip)
+  // Live driver location: update Firestore only when moved 100m+
+  const lastWrittenLocation = useRef(null);
   useEffect(() => {
     if (!user?.uid || !isOnline) return;
 
@@ -158,9 +160,16 @@ export default function DriverHome() {
         if (cancelled) return;
         const coord = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setDriverLocation(coord);
-        await updateDoc(doc(db, 'drivers', user.uid), {
-          location: { ...coord, updatedAt: serverTimestamp() },
-        });
+
+        // Only write to Firestore if moved 100m+ (saves writes at scale)
+        const prev = lastWrittenLocation.current;
+        const moved = prev ? haversineKm(prev.lat, prev.lng, coord.lat, coord.lng) * 1000 : 9999; // meters
+        if (moved > 100 || !prev) {
+          lastWrittenLocation.current = coord;
+          await updateDoc(doc(db, 'drivers', user.uid), {
+            location: { ...coord, updatedAt: serverTimestamp() },
+          });
+        }
       } catch (e) {
         // silently ignore — driver might've revoked permission
       }
@@ -237,7 +246,7 @@ export default function DriverHome() {
     if (isBlocked) {
       Alert.alert(
         "🚫 Account Blocked",
-        "Your account has been blocked by admin. Pay pending commission to unblock your account. Contact support for details."
+        "Your account has been blocked by admin. Contact support for details."
       );
       return;
     }
@@ -284,15 +293,12 @@ export default function DriverHome() {
     const commissionPct = booking.commission?.pct || 20;
     const earnPaise = Math.round(totalFare * (100 - commissionPct) / 100);
 
+    // Atomic increment — no race condition even with simultaneous completions
     const driverRef = doc(db, 'drivers', user.uid);
-    const driverSnap = await getDoc(driverRef);
-    const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
-
     await updateDoc(driverRef, {
-      earnings: {
-        todayInPaise: (cur.todayInPaise || 0) + earnPaise,
-        totalInPaise: (cur.totalInPaise || 0) + earnPaise,
-      },
+      'earnings.todayInPaise': increment(earnPaise),
+      'earnings.totalInPaise': increment(earnPaise),
+      'earnings.lastEarningDate': new Date().toISOString().slice(0, 10), // for midnight reset
     });
 
     Alert.alert("Job Done!", `You earned ₹${Math.round(earnPaise / 100)}`);
@@ -675,17 +681,31 @@ export default function DriverHome() {
                         </TouchableOpacity>
                         <TouchableOpacity 
                           style={s.acceptBtn}
-                          onPress={() => updateDoc(doc(db, 'bookings', item.id), {
-                            status: 'accepted',
-                            driverId: user.uid,
-                            driverName: driverDoc?.kyc?.fullName || profile?.name || 'Driver',
-                            driverPhone: profile?.phone || '',
-                            driverUpiId: driverDoc?.kyc?.upiId || '',
-                            driverVehicleLabel: driverDoc?.vehicle?.label || '',
-                            driverVehicleNumber: driverDoc?.vehicle?.number || '',
-                            driverVehicleModel: driverDoc?.vehicle?.model || '',
-                            acceptedAt: serverTimestamp(),
-                          })}
+                          onPress={async () => {
+                            try {
+                              const bookingRef = doc(db, 'bookings', item.id);
+                              await runTransaction(db, async (tx) => {
+                                const snap = await tx.get(bookingRef);
+                                if (!snap.exists()) throw new Error('Booking no longer exists');
+                                const data = snap.data();
+                                if (data.status !== 'searching') throw new Error('Already taken by another driver');
+                                if (data.driverId) throw new Error('Already accepted');
+                                tx.update(bookingRef, {
+                                  status: 'accepted',
+                                  driverId: user.uid,
+                                  driverName: driverDoc?.kyc?.fullName || profile?.name || 'Driver',
+                                  driverPhone: profile?.phone || '',
+                                  driverUpiId: driverDoc?.kyc?.upiId || '',
+                                  driverVehicleLabel: driverDoc?.vehicle?.label || '',
+                                  driverVehicleNumber: driverDoc?.vehicle?.number || '',
+                                  driverVehicleModel: driverDoc?.vehicle?.model || '',
+                                  acceptedAt: serverTimestamp(),
+                                });
+                              });
+                            } catch (e) {
+                              Alert.alert('Could not accept', e.message || 'This booking may have been taken.');
+                            }
+                          }}
                         >
                           <Ionicons name="checkmark" size={18} color="#FFF" />
                           <Text style={s.acceptBtnText}>Accept</Text>

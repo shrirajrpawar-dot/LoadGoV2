@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit, orderBy } from 'firebase/firestore';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -28,11 +28,11 @@ export default function DriverEarnings() {
       collection(db, 'bookings'),
       where('driverId', '==', user.uid),
       where('status', '==', 'completed'),
+      orderBy('completedAt', 'desc'),
       limit(pageSize + 1) // one extra so we know if there's more
     );
     const unsubPaged = onSnapshot(qPaged, (snap) => {
       const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      all.sort((a, b) => (b.completedAt?.toMillis?.() || 0) - (a.completedAt?.toMillis?.() || 0));
       setHasMore(all.length > pageSize);
       setCompletedBookings(all.slice(0, pageSize));
       setLoading(false);
