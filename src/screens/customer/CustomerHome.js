@@ -638,6 +638,8 @@ export default function CustomerHome() {
           </TouchableOpacity>
         </View>
 
+        <ScrollView style={{ flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+
         {activeBooking.status === 'awaiting_payment' ? (
           <View style={styles.paymentCard}>
             <View style={styles.paymentCardHeader}>
@@ -769,6 +771,7 @@ export default function CustomerHome() {
             {actionLoading ? <ActivityIndicator color="#EF4444" /> : <Text style={styles.cancelBtnText}>Cancel Booking</Text>}
           </TouchableOpacity>
         )}
+        </ScrollView>
       </View>
     );
   };
@@ -869,7 +872,7 @@ const styles = StyleSheet.create({
   locateBtn: { position: 'absolute', right: 16, top: -60, width: 46, height: 46, borderRadius: 23, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 10, zIndex: 100 },
   markerPin: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', borderWidth: 2.5, borderColor: '#FFF', shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 4, elevation: 4 },
   bottomSheetWrapper: { position: 'absolute', bottom: 0, left: 0, right: 0 },
-  bottomSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, maxHeight: height * 0.45, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.06, shadowRadius: 12, elevation: 16 },
+  bottomSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, maxHeight: height * 0.55, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.06, shadowRadius: 12, elevation: 16 },
   fareSheetContainer: { height: height * 0.65, backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
   sheetHeaderFixed: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 20, marginBottom: 16 },
   sheetTitleFixed: { fontSize: 22, fontWeight: '800', color: '#111827' },
