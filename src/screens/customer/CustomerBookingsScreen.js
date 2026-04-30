@@ -41,7 +41,19 @@ function buildInvoiceHTML(booking) {
                         booking.createdAt?.toDate?.()?.toLocaleString() ||
                         new Date().toLocaleString();
   const bookingShortId = booking.id.substring(0, 12).toUpperCase();
-  const paymentLabel = booking.paymentMethod === 'upi' ? 'UPI (Online)' : 'Cash on Delivery';
+  const paymentMethodLabel = (() => {
+    const m = booking.paymentMethod;
+    if (m === 'upi_direct' || m === 'upi') return 'UPI (Direct to Driver)';
+    if (m === 'razorpay') return 'Razorpay (Online)';
+    return 'Cash';
+  })();
+  const paymentStatusLabel = (() => {
+    const s = booking.paymentStatus;
+    if (s === 'driver_confirmed') return 'Confirmed';
+    if (s === 'customer_paid') return 'Paid (Awaiting Confirmation)';
+    return 'Pending';
+  })();
+  const paymentLabel = `${paymentMethodLabel} — ${paymentStatusLabel}`;
   const escape = (s) => String(s || '').replace(/[<>&"]/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;' }[c]));
 
   return `
@@ -561,6 +573,17 @@ function BookingCard({ booking, settings }) {
             <Ionicons name="checkmark-circle" size={18} color="#10B981" />
             <Text style={styles.completedText}>Successfully Delivered</Text>
           </View>
+          <View style={styles.paymentInfoRow}>
+            <Text style={styles.paymentInfoLabel}>Payment</Text>
+            <Text style={styles.paymentInfoValue}>
+              {booking.paymentMethod === 'upi_direct' || booking.paymentMethod === 'upi' 
+                ? 'UPI' 
+                : booking.paymentMethod === 'razorpay' 
+                  ? 'Razorpay' 
+                  : 'Cash'}
+              {booking.paymentStatus === 'driver_confirmed' ? ' ✅ Confirmed' : booking.paymentStatus === 'customer_paid' ? ' ⏳ Pending' : ''}
+            </Text>
+          </View>
           <TouchableOpacity
             style={styles.shareReceiptBtn}
             onPress={() => shareReceipt(booking)}
@@ -629,6 +652,9 @@ const styles = StyleSheet.create({
 
   shareReceiptBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 10, paddingVertical: 12, backgroundColor: '#EFF6FF', borderRadius: 12, borderWidth: 1, borderColor: '#DBEAFE' },
   shareReceiptText: { fontSize: 14, fontWeight: '700', color: '#3B82F6' },
+  paymentInfoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, paddingHorizontal: 4, marginTop: 6 },
+  paymentInfoLabel: { fontSize: 12, fontWeight: '600', color: '#6B7280' },
+  paymentInfoValue: { fontSize: 13, fontWeight: '700', color: '#111827' },
   loadMoreBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 14, marginTop: 4, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: '#F3F4F6' },
   loadMoreText: { fontSize: 13, color: '#374151', fontWeight: '700' },
 });

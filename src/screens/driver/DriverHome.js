@@ -42,10 +42,15 @@ export default function DriverHome() {
   const [actionLoading, setActionLoading] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [driverLocation, setDriverLocation] = useState(null); // {lat, lng}
+  const [pendingCommissionPaise, setPendingCommissionPaise] = useState(0);
 
   // KYC status check
   const kycStatus = driverDoc?.kyc?.status || 'not_started';
   const isKycApproved = kycStatus === 'approved' || kycStatus === 'verified';
+  const isBlocked = !!driverDoc?.blocked;
+  const maxOwedRupees = Number(settings.maxOwedCommission) || 500;
+  const pendingCommissionRupees = Math.round(pendingCommissionPaise / 100);
+  const isCommissionBlocked = pendingCommissionRupees > maxOwedRupees;
 
   // Active states the driver still cares about (current trip)
   const ACTIVE_STATES = ['accepted', 'arrived', 'picked_up', 'reached_dropoff', 'awaiting_payment'];
@@ -182,13 +187,69 @@ export default function DriverHome() {
     }
   }, [currentBooking?.status, focusedIndex, availableBookings.length]);
 
-  // Logic to prevent going online
+  // Pending commission listener
+  useEffect(() => {
+    if (!user?.uid) return;
+    const q = query(
+      collection(db, 'bookings'),
+      where('driverId', '==', user.uid),
+      where('commission.status', '==', 'pending_from_driver')
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const total = snap.docs.reduce((sum, d) => sum + (d.data().commission?.amountInPaise || 0), 0);
+      setPendingCommissionPaise(total);
+    });
+    return () => unsub();
+  }, [user?.uid]);
+
+  // Pay commission via UPI to Sarthi
+  const payCommission = async () => {
+    const sarthiUpi = settings.upiId;
+    if (!sarthiUpi) {
+      Alert.alert('Error', 'Company UPI ID not configured. Contact admin.');
+      return;
+    }
+    const amount = pendingCommissionRupees;
+    const note = encodeURIComponent(`Sarthi Commission - ${user.uid.slice(0, 6)}`);
+    const upiUrl = `upi://pay?pa=${sarthiUpi}&pn=Sarthi&am=${amount}&cu=INR&tn=${note}`;
+    try {
+      const supported = await Linking.canOpenURL(upiUrl);
+      if (!supported) {
+        Alert.alert('No UPI App', `Pay manually to ${sarthiUpi}, amount ₹${amount}`);
+        return;
+      }
+      await Linking.openURL(upiUrl);
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
   const toggleOnline = async () => {
     if (!isKycApproved) {
       Alert.alert(
         "🔒 KYC Required",
         "Your account is not yet verified. Please complete your KYC and wait for admin approval to start receiving bookings.",
-        [{ text: "View KYC Status", onPress: () => {} }] // Add navigation to Profile if needed
+        [{ text: "View KYC Status", onPress: () => {} }]
+      );
+      return;
+    }
+
+    if (isBlocked) {
+      Alert.alert(
+        "🚫 Account Blocked",
+        "Your account has been blocked by admin. Pay pending commission to unblock your account. Contact support for details."
+      );
+      return;
+    }
+
+    if (!isOnline && isCommissionBlocked) {
+      Alert.alert(
+        "💰 Commission Due",
+        `You owe ₹${pendingCommissionRupees} in commission (limit ₹${maxOwedRupees}). Please clear your dues to go online.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Pay Now', onPress: payCommission },
+        ]
       );
       return;
     }
@@ -379,14 +440,15 @@ export default function DriverHome() {
                 <Text style={s.title}>Driver Mode</Text>
                 {!isKycApproved && <Ionicons name="lock-closed" size={16} color="#F59E0B" style={{ marginLeft: 6 }} />}
             </View>
-            <Text style={{ fontSize: 12, color: !isKycApproved ? '#F59E0B' : (isOnline ? 'green' : 'red'), fontWeight: '600' }}>
-              {!isKycApproved ? `KYC ${kycStatus.toUpperCase()} — Tap for help` : (isOnline ? 'ONLINE' : 'OFFLINE')}
+            <Text style={{ fontSize: 12, color: isBlocked ? '#EF4444' : !isKycApproved ? '#F59E0B' : isCommissionBlocked ? '#F59E0B' : (isOnline ? 'green' : 'red'), fontWeight: '600' }}>
+              {isBlocked ? '🚫 BLOCKED' : !isKycApproved ? `KYC ${kycStatus.toUpperCase()} — Tap for help` : isCommissionBlocked ? '💰 DUES PENDING' : (isOnline ? 'ONLINE' : 'OFFLINE')}
             </Text>
           </TouchableOpacity>
           <Switch 
             value={isOnline} 
             onValueChange={toggleOnline}
-            trackColor={{ false: "#D1D5DB", true: "#10B981" }}
+            disabled={isBlocked}
+            trackColor={{ false: "#D1D5DB", true: isBlocked ? '#FECACA' : "#10B981" }}
           />
         </View>
       </SafeAreaView>
@@ -651,11 +713,35 @@ export default function DriverHome() {
             </View>
           ) : (
             <View style={s.panel}>
-                <Text style={s.centerTxt}>
+                {isBlocked ? (
+                  <View style={s.blockedBanner}>
+                    <Text style={s.blockedTitle}>🚫 Account Blocked</Text>
+                    <Text style={s.blockedSub}>Your account has been blocked by admin. Contact support for details.</Text>
+                  </View>
+                ) : isCommissionBlocked ? (
+                  <View style={s.commissionBanner}>
+                    <Text style={s.commissionTitle}>💰 Commission Due — ₹{pendingCommissionRupees}</Text>
+                    <Text style={s.commissionSub}>You owe more than the ₹{maxOwedRupees} limit. Pay your dues to go online.</Text>
+                    <TouchableOpacity style={s.payCommissionBtn} onPress={payCommission}>
+                      <Text style={s.payCommissionBtnTxt}>Pay ₹{pendingCommissionRupees} via UPI</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <Text style={s.centerTxt}>
                     {!isKycApproved 
                         ? "Complete KYC to see requests" 
                         : (isOnline ? "Searching for requests nearby..." : "You are currently Offline")}
-                </Text>
+                  </Text>
+                )}
+
+                {/* Show pending commission reminder even if not blocked */}
+                {!isCommissionBlocked && pendingCommissionRupees > 0 && !currentBooking && (
+                  <TouchableOpacity style={s.commissionReminder} onPress={payCommission}>
+                    <Text style={s.commissionReminderTxt}>
+                      💰 You owe ₹{pendingCommissionRupees} commission — Tap to pay
+                    </Text>
+                  </TouchableOpacity>
+                )}
             </View>
           )
         )}
@@ -689,6 +775,16 @@ const s = StyleSheet.create({
   awaitingPaymentTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
   awaitingPaymentSub: { fontSize: 14, fontWeight: '700', color: '#78350F', marginBottom: 6 },
   awaitingPaymentHint: { fontSize: 12, fontWeight: '500', color: '#92400E' },
+  blockedBanner: { backgroundColor: '#FEF2F2', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FECACA', alignItems: 'center' },
+  blockedTitle: { fontSize: 16, fontWeight: '900', color: '#991B1B', marginBottom: 4 },
+  blockedSub: { fontSize: 13, fontWeight: '500', color: '#B91C1C', textAlign: 'center' },
+  commissionBanner: { backgroundColor: '#FEF3C7', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FDE68A', alignItems: 'center' },
+  commissionTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
+  commissionSub: { fontSize: 12, fontWeight: '500', color: '#78350F', textAlign: 'center', marginBottom: 12 },
+  payCommissionBtn: { backgroundColor: '#10B981', borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12 },
+  payCommissionBtnTxt: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
+  commissionReminder: { backgroundColor: '#FEF3C7', borderRadius: 10, padding: 10, marginTop: 12, borderWidth: 1, borderColor: '#FDE68A' },
+  commissionReminderTxt: { fontSize: 12, fontWeight: '700', color: '#92400E', textAlign: 'center' },
   navBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', paddingVertical: 13, borderRadius: 12, marginTop: 10 },
   navBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14, letterSpacing: 0.2 },
   input: { borderBottomWidth: 2, borderColor: '#eee', padding: 10, textAlign: 'center', fontSize: 24, fontWeight: 'bold', marginBottom: 10 },
