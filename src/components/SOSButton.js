@@ -176,7 +176,7 @@ export function SOSButton({ booking, position }) {
               size={32}
               color="#FFFFFF"
             />
-            <Text style={s.sosButtonText}>{sosActive ? 'SOS ACTIVE' : 'SOS'}</Text>
+            <Text style={s.sosButtonText}>{sosActive ? 'SOS' : 'SOS'}</Text>
           </>
         )}
       </TouchableOpacity>
@@ -313,19 +313,10 @@ export function SOSButton({ booking, position }) {
         </View>
       </Modal>
 
-      {/* SOS Active Banner */}
+      {/* SOS Status Indicator - Minimal, no layout break */}
       {sosActive && (
-        <View style={s.sosActiveBanner}>
-          <Ionicons name="alert-circle" size={20} color="#FFFFFF" />
-          <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={s.sosActiveBannerTitle}>🚨 SOS Active</Text>
-            <Text style={s.sosActiveBannerText}>
-              Support team is monitoring your journey
-            </Text>
-          </View>
-          <TouchableOpacity onPress={cancelSOS}>
-            <Text style={s.sosActiveBannerCancel}>Cancel</Text>
-          </TouchableOpacity>
+        <View style={s.sosStatusDot}>
+          <Ionicons name="alert-circle" size={16} color="#FFFFFF" />
         </View>
       )}
     </>
@@ -456,30 +447,14 @@ const s = StyleSheet.create({
     fontWeight: '700',
     color: '#6B7280',
   },
-  sosActiveBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#DC2626',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+  // Minimal status indicator - doesn't break layout
+  sosStatusDot: {
+    width: 20,
+    height: 20,
     borderRadius: 10,
-    marginHorizontal: 16,
-    marginVertical: 8,
-  },
-  sosActiveBannerTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    marginBottom: 2,
-  },
-  sosActiveBannerText: {
-    fontSize: 11,
-    color: '#FEE2E2',
-  },
-  sosActiveBannerCancel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    textDecorationLine: 'underline',
+    backgroundColor: '#DC2626',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: -10,
   },
 });
