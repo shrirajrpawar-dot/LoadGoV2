@@ -244,4 +244,138 @@ exports.razorpayWebhook = onRequest({ region: 'asia-south1' }, async (req, res) 
   }
 
   res.status(200).send('OK');
+
+
+  const functions = require('firebase-functions');
+  const admin = require('firebase-admin');
+  const { getFirestore } = require('firebase-admin/firestore');
+  
+  // Initialize Firebase Admin
+  if (!admin.apps.length) {
+    admin.initializeApp();
+  }
+  
+  const db = getFirestore();
+  
+  // ============================================
+  // EXISTING FUNCTIONS - DO NOT MODIFY
+  // ============================================
+  
+  // Your existing quoteFare function (copy from your current functions)
+  // exports.quoteFare = functions.https.onCall(async (data, context) => {
+  //   // ... your existing code ...
+  // });
+  
+  // Your existing Razorpay functions (if any)
+  // exports.createRazorpayOrder = functions.https.onCall(async (data, context) => {
+  //   // ... your existing code ...
+  // });
+  
+  // ============================================
+  // NEW: SOS HANDLER - ADDED FOR SAFETY
+  // ============================================
+  
+  /**
+   * Triggered when customer creates SOS record
+   * Sends alert to driver and creates admin notification
+   */
+  exports.handleCustomerSOS = functions
+    .region('asia-south1')
+    .firestore.document('sos/{sosId}')
+    .onCreate(async (snap, context) => {
+      const sos = snap.data();
+      const sosId = snap.id;
+  
+      try {
+        // Get customer details
+        const customerSnap = await db.collection('users').doc(sos.customerId).get();
+        const customer = customerSnap.data() || {};
+  
+        // Get booking details
+        let booking = null;
+        if (sos.bookingId) {
+          const bookingSnap = await db.collection('bookings').doc(sos.bookingId).get();
+          booking = bookingSnap.data();
+        }
+  
+        // === Alert Driver ===
+        if (sos.type === 'driver' && booking?.driverId) {
+          const driverSnap = await db.collection('drivers').doc(booking.driverId).get();
+          const driver = driverSnap.data();
+  
+          // Send push notification to driver (if FCM token exists)
+          if (driver?.fcmToken) {
+            try {
+              await admin.messaging().send({
+                token: driver.fcmToken,
+                notification: {
+                  title: '🚨 EMERGENCY ALERT',
+                  body: `Customer ${customer.name} has triggered SOS`,
+                },
+                data: {
+                  type: 'sos',
+                  sosId,
+                  bookingId: sos.bookingId,
+                },
+              });
+            } catch (fcmError) {
+              console.log('FCM error (non-critical):', fcmError.message);
+            }
+          }
+  
+          // Create notification record
+          await db.collection('notifications').add({
+            recipientId: booking.driverId,
+            type: 'sos_alert',
+            title: '🚨 Customer Emergency Alert',
+            message: `${customer.name} has triggered SOS`,
+            sosId,
+            bookingId: sos.bookingId,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            read: false,
+          });
+        }
+  
+        // === Alert Support Team ===
+        if (sos.type === 'support' || sos.type === 'police') {
+          await db.collection('admin-alerts').add({
+            type: sos.type === 'police' ? 'police_sos' : 'support_sos',
+            customerId: sos.customerId,
+            customerName: customer.name,
+            customerPhone: customer.phone,
+            sosId,
+            bookingId: sos.bookingId,
+            location: sos.customerLocation,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            status: 'pending',
+          });
+        }
+  
+        console.log(`SOS handler completed for: ${sosId}`);
+        return { success: true, sosId };
+  
+      } catch (error) {
+        console.error('Error in handleCustomerSOS:', error);
+        throw error;
+      }
+    });
+  
+  // ============================================
+  // NOTE: To keep existing functions
+  // ============================================
+  // If you have existing functions in your index.js:
+  // 1. Copy them here OR
+  // 2. Keep them in separate file and export both:
+  //    exports.handleCustomerSOS = require('./sos').handleCustomerSOS;
+  //    exports.quoteFare = require('./booking').quoteFare;
+  //    etc...
+  
+  // Example of how to preserve existing functions:
+  // module.exports = {
+  //   handleCustomerSOS: functions.firestore.document(...).onCreate(...),
+  //   quoteFare: functions.https.onCall(async (data, context) => { ... }),
+  //   // ... other functions
+  // };
+
+
 });

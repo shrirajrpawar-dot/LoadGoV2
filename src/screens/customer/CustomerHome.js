@@ -23,6 +23,7 @@ import { httpsCallable } from 'firebase/functions';
 import { db, functions, auth, GOOGLE_MAPS_API_KEY } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
+import { SOSButton } from '../../components/SOSButton';
 
 const { width, height } = Dimensions.get('window');
 const GOOGLE_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY;
@@ -849,6 +850,13 @@ export default function CustomerHome() {
         {bookingPhase === 'fare' ? renderFarePhase() : null}
         {bookingPhase === 'active' ? renderActiveBooking() : null}
       </KeyboardAvoidingView>
+
+      {/* 🚨 SOS Button - Only show on active booking */}
+      {currentBookingId && activeBooking && bookingPhase === 'active' && (
+        <View style={{ position: 'absolute', bottom: 80, right: 20, zIndex: 100 }}>
+          <SOSButton booking={activeBooking} position={mapMarker} />
+        </View>
+      )}
     </View>
   );
 }

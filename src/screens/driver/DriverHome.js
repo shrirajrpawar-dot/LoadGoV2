@@ -196,7 +196,7 @@ export default function DriverHome() {
     }
   }, [currentBooking?.status, focusedIndex, availableBookings.length]);
 
-  // Pending commission listener
+  // Pending commission listener + auto-enforcement + auto-unblock
   useEffect(() => {
     if (!user?.uid) return;
     const q = query(
@@ -204,12 +204,45 @@ export default function DriverHome() {
       where('driverId', '==', user.uid),
       where('commission.status', '==', 'pending_from_driver')
     );
-    const unsub = onSnapshot(q, (snap) => {
+    const unsub = onSnapshot(q, async (snap) => {
       const total = snap.docs.reduce((sum, d) => sum + (d.data().commission?.amountInPaise || 0), 0);
       setPendingCommissionPaise(total);
+      
+      const duesRupees = Math.round(total / 100);
+      const maxRupees = Number(settings.maxOwedCommission) || 500;
+      
+      // Auto-force offline if dues exceed limit while driver is online
+      if (isOnline && duesRupees > maxRupees) {
+        try {
+          await updateDoc(doc(db, 'drivers', user.uid), { status: 'offline' });
+          Alert.alert(
+            '💰 Commission Dues Exceeded',
+            `You owe ₹${duesRupees} (limit: ₹${maxRupees}). You've been automatically set offline. Pay your dues to go back online.`,
+            [{ text: 'Pay Now', onPress: payCommission }]
+          );
+        } catch (e) {
+          console.error('Could not force offline:', e.message);
+        }
+      }
+      
+      // Auto-unblock if dues now < limit and driver was previously blocked
+      if (!isOnline && duesRupees < maxRupees && driverDoc?.commissionPaymentClaimedAt) {
+        try {
+          await updateDoc(doc(db, 'drivers', user.uid), { 
+            commissionPaymentClaimedAt: null, // Clear the payment claim flag
+          });
+          Alert.alert(
+            '✅ Commission Cleared!',
+            `Your dues are now settled. You can go online again!`,
+            [{ text: 'Go Online', onPress: () => setIsOnline(true) }]
+          );
+        } catch (e) {
+          console.error('Could not auto-unblock:', e.message);
+        }
+      }
     });
     return () => unsub();
-  }, [user?.uid]);
+  }, [user?.uid, isOnline, settings.maxOwedCommission, driverDoc?.commissionPaymentClaimedAt]);
 
   // Pay commission via UPI to Sarthi
   const payCommission = async () => {
@@ -228,6 +261,35 @@ export default function DriverHome() {
         return;
       }
       await Linking.openURL(upiUrl);
+      
+      // After UPI app returns, ask if payment was sent
+      setTimeout(() => {
+        Alert.alert(
+          'Payment Confirmation',
+          `Did you complete the payment of ₹${amount}?`,
+          [
+            { text: 'No, not yet', style: 'cancel' },
+            {
+              text: 'Yes, I paid!',
+              onPress: () => {
+                // Add a marker that driver claims payment sent
+                updateDoc(doc(db, 'drivers', user.uid), {
+                  commissionPaymentClaimedAt: new Date().toISOString(),
+                  commissionPaymentAmount: amount,
+                })
+                  .then(() => {
+                    Alert.alert(
+                      '✅ Payment Logged',
+                      `Your payment of ₹${amount} has been recorded. Admin will verify within 1-2 hours and you'll be unblocked automatically.`,
+                      [{ text: 'OK', onPress: () => {} }]
+                    );
+                  })
+                  .catch(e => Alert.alert('Error', e.message));
+              },
+            },
+          ]
+        );
+      }, 1000);
     } catch (e) {
       Alert.alert('Error', e.message);
     }
@@ -739,13 +801,28 @@ export default function DriverHome() {
                     <Text style={s.blockedSub}>Your account has been blocked by admin. Contact support for details.</Text>
                   </View>
                 ) : isCommissionBlocked ? (
-                  <View style={s.commissionBanner}>
-                    <Text style={s.commissionTitle}>💰 Commission Due — ₹{pendingCommissionRupees}</Text>
-                    <Text style={s.commissionSub}>You owe more than the ₹{maxOwedRupees} limit. Pay your dues to go online.</Text>
-                    <TouchableOpacity style={s.payCommissionBtn} onPress={payCommission}>
-                      <Text style={s.payCommissionBtnTxt}>Pay ₹{pendingCommissionRupees} via UPI</Text>
-                    </TouchableOpacity>
-                  </View>
+                  driverDoc?.commissionPaymentClaimedAt ? (
+                    <View style={s.paymentVerifyingBanner}>
+                      <Ionicons name="hourglass" size={20} color="#D97706" />
+                      <View style={{ flex: 1, marginLeft: 12 }}>
+                        <Text style={s.paymentVerifyingTitle}>⏳ Payment Verification In Progress</Text>
+                        <Text style={s.paymentVerifyingText}>
+                          Admin is verifying your ₹{pendingCommissionRupees} payment. This usually takes 15-30 minutes.
+                        </Text>
+                        <Text style={s.paymentVerifyingHint}>
+                          You'll be automatically unblocked once verified.
+                        </Text>
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={s.commissionBanner}>
+                      <Text style={s.commissionTitle}>💰 Commission Due — ₹{pendingCommissionRupees}</Text>
+                      <Text style={s.commissionSub}>You owe more than the ₹{maxOwedRupees} limit. Pay your dues to go online.</Text>
+                      <TouchableOpacity style={s.payCommissionBtn} onPress={payCommission}>
+                        <Text style={s.payCommissionBtnTxt}>Pay ₹{pendingCommissionRupees} via UPI</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )
                 ) : (
                   <Text style={s.centerTxt}>
                     {!isKycApproved 
@@ -755,10 +832,22 @@ export default function DriverHome() {
                 )}
 
                 {/* Show pending commission reminder even if not blocked */}
-                {!isCommissionBlocked && pendingCommissionRupees > 0 && !currentBooking && (
-                  <TouchableOpacity style={s.commissionReminder} onPress={payCommission}>
-                    <Text style={s.commissionReminderTxt}>
-                      💰 You owe ₹{pendingCommissionRupees} commission — Tap to pay
+                {pendingCommissionRupees > 0 && !currentBooking && (
+                  <TouchableOpacity 
+                    style={[
+                      s.commissionReminder,
+                      pendingCommissionRupees > (maxOwedRupees * 0.8) && { backgroundColor: '#FEF2F2', borderColor: '#FECACA' }
+                    ]}
+                    onPress={payCommission}
+                  >
+                    <Text style={[
+                      s.commissionReminderTxt,
+                      pendingCommissionRupees > (maxOwedRupees * 0.8) && { color: '#991B1B' }
+                    ]}>
+                      {pendingCommissionRupees > (maxOwedRupees * 0.8) 
+                        ? `⚠️ URGENT: You owe ₹${pendingCommissionRupees} (limit ₹${maxOwedRupees}) — Pay now!`
+                        : `💰 You owe ₹${pendingCommissionRupees} commission — Tap to pay`
+                      }
                     </Text>
                   </TouchableOpacity>
                 )}
@@ -799,6 +888,19 @@ const s = StyleSheet.create({
   blockedTitle: { fontSize: 16, fontWeight: '900', color: '#991B1B', marginBottom: 4 },
   blockedSub: { fontSize: 13, fontWeight: '500', color: '#B91C1C', textAlign: 'center' },
   commissionBanner: { backgroundColor: '#FEF3C7', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FDE68A', alignItems: 'center' },
+  paymentVerifyingBanner: { 
+    backgroundColor: '#FEF3C7', 
+    borderRadius: 14, 
+    padding: 16, 
+    borderWidth: 1.5, 
+    borderColor: '#FDE68A', 
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  paymentVerifyingTitle: { fontSize: 14, fontWeight: '800', color: '#92400E', marginBottom: 4 },
+  paymentVerifyingText: { fontSize: 12, color: '#78350F', lineHeight: 16, marginBottom: 4 },
+  paymentVerifyingHint: { fontSize: 11, color: '#92400E', fontStyle: 'italic' },
   commissionTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
   commissionSub: { fontSize: 12, fontWeight: '500', color: '#78350F', textAlign: 'center', marginBottom: 12 },
   payCommissionBtn: { backgroundColor: '#10B981', borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12 },
