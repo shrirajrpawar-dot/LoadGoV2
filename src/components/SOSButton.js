@@ -4,7 +4,8 @@ import {
   ScrollView, ActivityIndicator, SafeAreaView, Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { doc, updateDoc, addDoc, collection, serverTimestamp, getDoc } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import * as Location from 'expo-location';
 import { db } from '../../firebase';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -15,20 +16,43 @@ export function SOSButton({ booking, position }) {
   const [sosVisible, setSosVisible] = useState(false);
   const [sosActive, setSosActive] = useState(false);
   const [sosLoading, setSosLoading] = useState(false);
+  const [locationSharing, setLocationSharing] = useState(false);
+
+  // Get current location
+  const getCurrentLocation = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Location permission is required');
+        return null;
+      }
+      const location = await Location.getCurrentPositionAsync({});
+      return {
+        lat: location.coords.latitude,
+        lng: location.coords.longitude,
+      };
+    } catch (e) {
+      console.log('Location error:', e);
+      return position || null;
+    }
+  };
 
   const triggerSOS = async (type) => {
     setSosLoading(true);
     try {
+      // Get current location
+      const currentLocation = await getCurrentLocation();
+
       // Create SOS record in Firestore
-      await addDoc(collection(db, 'sos'), {
+      const sosDoc = await addDoc(collection(db, 'sos'), {
         customerId: user.uid,
         customerName: profile?.name || 'Unknown',
         customerPhone: profile?.phone || '',
         type, // 'driver', 'support', 'police'
         bookingId: booking?.id || null,
-        pickupLocation: booking?.pickup || {},
+        pickupLocation: booking?.pickup || currentLocation || {},
         dropLocation: booking?.drop || {},
-        customerLocation: position || {},
+        customerLocation: currentLocation || position || {},
         triggeredAt: serverTimestamp(),
         status: 'active',
         notes: '',
@@ -61,9 +85,67 @@ export function SOSButton({ booking, position }) {
         setSosActive(false);
       }, 30 * 60 * 1000);
     } catch (e) {
-      Alert.alert('Error', e.message);
+      console.log('SOS Error:', e);
+      Alert.alert('Error', e.message || 'Failed to trigger SOS. Please try again.');
     } finally {
       setSosLoading(false);
+    }
+  };
+
+  const shareLocation = async () => {
+    setLocationSharing(true);
+    try {
+      // Request location permission
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Location permission is required to share location');
+        return;
+      }
+
+      // Get location
+      const currentLocation = await Location.getCurrentPositionAsync({});
+      const lat = currentLocation.coords.latitude;
+      const lng = currentLocation.coords.longitude;
+
+      // Create SOS record with location
+      await addDoc(collection(db, 'sos'), {
+        customerId: user.uid,
+        customerName: profile?.name || 'Unknown',
+        customerPhone: profile?.phone || '',
+        type: 'support', // Share location goes to support
+        bookingId: booking?.id || null,
+        pickupLocation: booking?.pickup || {},
+        dropLocation: booking?.drop || {},
+        customerLocation: {
+          lat,
+          lng,
+          address: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+        },
+        triggeredAt: serverTimestamp(),
+        status: 'active',
+        notes: 'Customer shared live location',
+        locationSharing: true,
+        locationSharingEndsAt: serverTimestamp(), // Will be + 30 min on cloud function
+      });
+
+      setSosActive(true);
+      setSosVisible(false);
+
+      Alert.alert(
+        '📍 Location Shared',
+        'Your live location is now shared with Sarthi support team for 30 minutes',
+        [{ text: 'OK' }]
+      );
+
+      // Auto-stop sharing after 30 minutes
+      setTimeout(() => {
+        setSosActive(false);
+      }, 30 * 60 * 1000);
+    } catch (e) {
+      console.log('Location Sharing Error:', e);
+      Alert.alert('Error', 'Failed to share location. Please try again.');
+    } finally {
+      setLocationSharing(false);
     }
   };
 
@@ -196,21 +278,8 @@ export function SOSButton({ booking, position }) {
               {/* Share Live Location */}
               <TouchableOpacity
                 style={s.sosOption}
-                onPress={() => {
-                  Alert.alert(
-                    'Share Live Location',
-                    'Share your live location with support team for 30 minutes?',
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      {
-                        text: 'Share',
-                        onPress: () => {
-                          setSosVisible(false);
-                        },
-                      },
-                    ]
-                  );
-                }}
+                onPress={shareLocation}
+                disabled={locationSharing}
               >
                 <View style={s.sosOptionIcon}>
                   <Ionicons name="location" size={24} color="#F59E0B" />
@@ -218,10 +287,14 @@ export function SOSButton({ booking, position }) {
                 <View style={{ flex: 1 }}>
                   <Text style={s.sosOptionTitle}>Share Live Location</Text>
                   <Text style={s.sosOptionDesc}>
-                    Real-time location shared with Sarthi support team
+                    Real-time location shared with Sarthi support team for 30 minutes
                   </Text>
                 </View>
-                <Ionicons name="chevron-forward" size={20} color="#D1D5DB" />
+                {locationSharing ? (
+                  <ActivityIndicator size="small" color="#6B7280" />
+                ) : (
+                  <Ionicons name="chevron-forward" size={20} color="#D1D5DB" />
+                )}
               </TouchableOpacity>
             </ScrollView>
 

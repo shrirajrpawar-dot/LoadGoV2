@@ -851,9 +851,9 @@ export default function CustomerHome() {
         {bookingPhase === 'active' ? renderActiveBooking() : null}
       </KeyboardAvoidingView>
 
-      {/* 🚨 SOS Button - Only show on active booking */}
+      {/* SOS Button - Top Right, Active Booking Only */}
       {currentBookingId && activeBooking && bookingPhase === 'active' && (
-        <View style={{ position: 'absolute', bottom: 80, right: 20, zIndex: 100 }}>
+        <View style={{ position: 'absolute', top: 80, right: 20, zIndex: 100 }}>
           <SOSButton booking={activeBooking} position={mapMarker} />
         </View>
       )}
