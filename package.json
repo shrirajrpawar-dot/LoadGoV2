@@ -34,7 +34,8 @@
     "react-native-webview": "13.8.6"
   },
   "devDependencies": {
-    "@babel/core": "^7.24.0"
+    "@babel/core": "^7.24.0",
+    "expo-module-scripts": "^55.0.2"
   },
   "private": true
 }

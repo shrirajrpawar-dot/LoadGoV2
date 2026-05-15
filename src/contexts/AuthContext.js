@@ -5,6 +5,7 @@ import {
   signOut as firebaseSignOut,
 } from 'firebase/auth';
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '../../firebase';
 
 const AuthContext = createContext();
@@ -20,13 +21,18 @@ export function AuthProvider({ children }) {
     let unsubProfile = null;
     let unsubDriver = null;
 
-    const unsubAuth = onAuthStateChanged(auth, (firebaseUser) => {
+    const unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
       // Clean up previous listeners
       if (unsubProfile) unsubProfile();
       if (unsubDriver) unsubDriver();
 
       if (firebaseUser) {
         setUser(firebaseUser);
+
+        // Cache user UID for offline use
+        try {
+          await AsyncStorage.setItem('cached_uid', firebaseUser.uid);
+        } catch (e) {}
 
         // Real-time user profile
         unsubProfile = onSnapshot(
@@ -36,24 +42,56 @@ export function AuthProvider({ children }) {
               const data = snap.data();
               setProfile(data);
               setMode(data.mode || 'customer');
+              // Cache profile for offline
+              AsyncStorage.setItem('cached_profile', JSON.stringify(data)).catch(() => {});
             } else {
               setProfile(null);
               setMode('customer');
             }
             setLoading(false);
           },
-          (err) => { console.error('Profile error:', err); setLoading(false); }
+          (err) => {
+            console.error('Profile listener error:', err);
+            // Firestore offline — load cached profile
+            loadCachedProfile();
+          }
         );
 
         // Real-time driver doc
         unsubDriver = onSnapshot(
           doc(db, 'drivers', firebaseUser.uid),
           (snap) => {
-            setDriverDoc(snap.exists() ? snap.data() : null);
+            const data = snap.exists() ? snap.data() : null;
+            setDriverDoc(data);
+            if (data) {
+              AsyncStorage.setItem('cached_driverDoc', JSON.stringify(data)).catch(() => {});
+            }
           },
           () => {}
         );
       } else {
+        // No Firebase user — check cached data (offline scenario)
+        try {
+          const cachedUid = await AsyncStorage.getItem('cached_uid');
+          if (cachedUid) {
+            // Try to re-authenticate silently
+            try {
+              await signInAnonymously(auth);
+              // onAuthStateChanged will fire again with the new user
+              return;
+            } catch (authError) {
+              // Can't re-auth (offline) — use cached data
+              console.log('[Auth] Offline mode, using cached data');
+              setUser({ uid: cachedUid, isOfflineCached: true });
+              await loadCachedProfile();
+              return;
+            }
+          }
+        } catch (e) {
+          console.error('[Auth] Cache read error:', e);
+        }
+
+        // No cached user — show login screen
         setUser(null);
         setProfile(null);
         setDriverDoc(null);
@@ -68,6 +106,24 @@ export function AuthProvider({ children }) {
       if (unsubDriver) unsubDriver();
     };
   }, []);
+
+  const loadCachedProfile = async () => {
+    try {
+      const cachedProfile = await AsyncStorage.getItem('cached_profile');
+      if (cachedProfile) {
+        const data = JSON.parse(cachedProfile);
+        setProfile(data);
+        setMode(data.mode || 'customer');
+      }
+      const cachedDriver = await AsyncStorage.getItem('cached_driverDoc');
+      if (cachedDriver) {
+        setDriverDoc(JSON.parse(cachedDriver));
+      }
+    } catch (e) {
+      console.error('[Auth] Cache parse error:', e);
+    }
+    setLoading(false);
+  };
 
   const login = async (name, email, phone) => {
     const result = await signInAnonymously(auth);
@@ -111,6 +167,10 @@ export function AuthProvider({ children }) {
   };
 
   const signOut = async () => {
+    // Clear cached data on explicit sign out
+    try {
+      await AsyncStorage.multiRemove(['cached_uid', 'cached_profile', 'cached_driverDoc']);
+    } catch (e) {}
     await firebaseSignOut(auth);
     setUser(null);
     setProfile(null);

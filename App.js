@@ -6,6 +6,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
+import { VersionUpdateModal } from './src/components/VersionUpdateModal';
 import LoginScreen from './src/screens/auth/LoginScreen';
 import CustomerHome from './src/screens/customer/CustomerHome';
 import CustomerBookingsScreen from './src/screens/customer/CustomerBookingsScreen';
@@ -47,6 +48,7 @@ export default function App() {
     <SafeAreaProvider>
       <StatusBar style="dark" />
       <AuthProvider>
+        <VersionUpdateModal />
         <AppContent />
       </AuthProvider>
     </SafeAreaProvider>
