@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Alert, Modal, Linking,
-  ScrollView, ActivityIndicator, SafeAreaView, Dimensions,
+  ScrollView, ActivityIndicator, Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { doc, updateDoc, addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp, updateDoc, doc } from 'firebase/firestore';
 import * as Location from 'expo-location';
 import { db } from '../../firebase';
 import { useAuth } from '../contexts/AuthContext';
@@ -16,9 +16,8 @@ export function SOSButton({ booking, position }) {
   const [sosVisible, setSosVisible] = useState(false);
   const [sosActive, setSosActive] = useState(false);
   const [sosLoading, setSosLoading] = useState(false);
-  const [locationSharing, setLocationSharing] = useState(false);
+  const [sosDocId, setSosDocId] = useState(null);
 
-  // Get current location
   const getCurrentLocation = async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -26,13 +25,9 @@ export function SOSButton({ booking, position }) {
         Alert.alert('Permission Denied', 'Location permission is required');
         return null;
       }
-      const location = await Location.getCurrentPositionAsync({});
-      return {
-        lat: location.coords.latitude,
-        lng: location.coords.longitude,
-      };
+      const loc = await Location.getCurrentPositionAsync({});
+      return { lat: loc.coords.latitude, lng: loc.coords.longitude };
     } catch (e) {
-      console.log('Location error:', e);
       return position || null;
     }
   };
@@ -40,15 +35,13 @@ export function SOSButton({ booking, position }) {
   const triggerSOS = async (type) => {
     setSosLoading(true);
     try {
-      // Get current location
       const currentLocation = await getCurrentLocation();
 
-      // Create SOS record in Firestore
       const sosDoc = await addDoc(collection(db, 'sos'), {
         customerId: user.uid,
         customerName: profile?.name || 'Unknown',
         customerPhone: profile?.phone || '',
-        type, // 'driver', 'support', 'police'
+        type,
         bookingId: booking?.id || null,
         pickupLocation: booking?.pickup || currentLocation || {},
         dropLocation: booking?.drop || {},
@@ -58,8 +51,9 @@ export function SOSButton({ booking, position }) {
         notes: '',
       });
 
-      // Update booking if driver SOS
-      if (booking?.id && type === 'driver') {
+      setSosDocId(sosDoc.id);
+
+      if (booking?.id) {
         await updateDoc(doc(db, 'bookings', booking.id), {
           sosTriggered: true,
           sosTriggeredAt: serverTimestamp(),
@@ -72,111 +66,72 @@ export function SOSButton({ booking, position }) {
 
       Alert.alert(
         '🚨 SOS Activated',
-        type === 'driver'
-          ? '✓ Driver has been alerted. Support team is being notified.'
-          : type === 'support'
-            ? '✓ Support team has been notified. They will call you shortly.'
-            : '✓ Emergency services have been contacted. Stay safe.',
+        type === 'support'
+          ? '✓ Sarthi support team has been notified. They will call you shortly.'
+          : '✓ Emergency services have been contacted. Stay safe.',
         [{ text: 'OK' }]
       );
-
-      // Auto-deactivate after 30 minutes
-      setTimeout(() => {
-        setSosActive(false);
-      }, 30 * 60 * 1000);
     } catch (e) {
-      console.log('SOS Error:', e);
       Alert.alert('Error', e.message || 'Failed to trigger SOS. Please try again.');
     } finally {
       setSosLoading(false);
     }
   };
 
-  const shareLocation = async () => {
-    setLocationSharing(true);
-    try {
-      // Request location permission
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Location permission is required to share location');
-        return;
-      }
-
-      // Get location
-      const currentLocation = await Location.getCurrentPositionAsync({});
-      const lat = currentLocation.coords.latitude;
-      const lng = currentLocation.coords.longitude;
-
-      // Create SOS record with location
-      await addDoc(collection(db, 'sos'), {
-        customerId: user.uid,
-        customerName: profile?.name || 'Unknown',
-        customerPhone: profile?.phone || '',
-        type: 'support', // Share location goes to support
-        bookingId: booking?.id || null,
-        pickupLocation: booking?.pickup || {},
-        dropLocation: booking?.drop || {},
-        customerLocation: {
-          lat,
-          lng,
-          address: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+  const deactivateSOS = () => {
+    Alert.alert(
+      'Deactivate SOS?',
+      'Are you sure you want to cancel your emergency alert?',
+      [
+        { text: 'Keep Active', style: 'cancel' },
+        {
+          text: 'Deactivate',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (sosDocId) {
+                await updateDoc(doc(db, 'sos', sosDocId), {
+                  status: 'resolved',
+                  resolvedAt: new Date().toISOString(),
+                  resolvedBy: 'customer_cancelled',
+                });
+              }
+              setSosActive(false);
+              setSosDocId(null);
+              Alert.alert('SOS Deactivated', 'Your emergency alert has been cancelled.');
+            } catch (e) {
+              Alert.alert('Error', 'Could not deactivate. Please try again.');
+            }
+          },
         },
-        triggeredAt: serverTimestamp(),
-        status: 'active',
-        notes: 'Customer shared live location',
-        locationSharing: true,
-        locationSharingEndsAt: serverTimestamp(), // Will be + 30 min on cloud function
-      });
-
-      setSosActive(true);
-      setSosVisible(false);
-
-      Alert.alert(
-        '📍 Location Shared',
-        'Your live location is now shared with Sarthi support team for 30 minutes',
-        [{ text: 'OK' }]
-      );
-
-      // Auto-stop sharing after 30 minutes
-      setTimeout(() => {
-        setSosActive(false);
-      }, 30 * 60 * 1000);
-    } catch (e) {
-      console.log('Location Sharing Error:', e);
-      Alert.alert('Error', 'Failed to share location. Please try again.');
-    } finally {
-      setLocationSharing(false);
-    }
-  };
-
-  const cancelSOS = async () => {
-    if (!sosActive) return;
-    try {
-      setSosActive(false);
-      Alert.alert('SOS Cancelled', 'Your emergency alert has been deactivated.');
-    } catch (e) {
-      Alert.alert('Error', e.message);
-    }
+      ]
+    );
   };
 
   return (
     <>
-      {/* SOS Button */}
+      {/* SOS Button — tap to open options OR deactivate if active */}
       <TouchableOpacity
         style={[s.sosButton, sosActive && s.sosButtonActive]}
-        onPress={() => setSosVisible(true)}
+        onPress={() => {
+          if (sosActive) {
+            deactivateSOS();
+          } else {
+            setSosVisible(true);
+          }
+        }}
         disabled={sosLoading}
       >
         {sosLoading ? (
-          <ActivityIndicator color="#FFFFFF" size="large" />
+          <ActivityIndicator color="#FFFFFF" size="small" />
         ) : (
           <>
             <Ionicons
-              name={sosActive ? 'alert-circle' : 'warning'}
-              size={32}
+              name={sosActive ? 'close-circle' : 'warning'}
+              size={28}
               color="#FFFFFF"
             />
-            <Text style={s.sosButtonText}>{sosActive ? 'SOS' : 'SOS'}</Text>
+            <Text style={s.sosButtonText}>{sosActive ? 'STOP' : 'SOS'}</Text>
           </>
         )}
       </TouchableOpacity>
@@ -193,50 +148,27 @@ export function SOSButton({ booking, position }) {
             <View style={s.sosHeader}>
               <Ionicons name="alert-circle" size={28} color="#DC2626" />
               <Text style={s.sosTitle}>Emergency Help</Text>
-              <TouchableOpacity
-                onPress={() => setSosVisible(false)}
-                style={s.closeBtn}
-              >
+              <TouchableOpacity onPress={() => setSosVisible(false)} style={s.closeBtn}>
                 <Ionicons name="close" size={24} color="#6B7280" />
               </TouchableOpacity>
             </View>
 
-            <Text style={s.sosSubtitle}>
-              Choose who you want to contact:
-            </Text>
+            <Text style={s.sosSubtitle}>Choose an option:</Text>
 
             <ScrollView style={s.sosOptions} showsVerticalScrollIndicator={false}>
-              {/* Contact Driver */}
-              <TouchableOpacity
-                style={s.sosOption}
-                onPress={() => triggerSOS('driver')}
-                disabled={sosLoading}
-              >
-                <View style={s.sosOptionIcon}>
-                  <Ionicons name="car" size={24} color="#10B981" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.sosOptionTitle}>Alert Driver</Text>
-                  <Text style={s.sosOptionDesc}>
-                    Your driver will be immediately notified of your emergency
-                  </Text>
-                </View>
-                <Ionicons name="chevron-forward" size={20} color="#D1D5DB" />
-              </TouchableOpacity>
-
-              {/* Contact Support */}
+              {/* Alert Sarthi */}
               <TouchableOpacity
                 style={s.sosOption}
                 onPress={() => triggerSOS('support')}
                 disabled={sosLoading}
               >
-                <View style={s.sosOptionIcon}>
-                  <Ionicons name="headset" size={24} color="#3B82F6" />
+                <View style={[s.sosOptionIcon, { borderColor: '#DBEAFE' }]}>
+                  <Ionicons name="headset" size={28} color="#3B82F6" />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={s.sosOptionTitle}>Contact Support</Text>
+                  <Text style={s.sosOptionTitle}>Alert Sarthi</Text>
                   <Text style={s.sosOptionDesc}>
-                    Sarthi support team will call you within 2 minutes
+                    Sarthi support team will be notified immediately and will call you within 2 minutes
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#D1D5DB" />
@@ -244,15 +176,16 @@ export function SOSButton({ booking, position }) {
 
               {/* Call Police */}
               <TouchableOpacity
-                style={s.sosOption}
+                style={[s.sosOption, { borderColor: '#FECACA' }]}
                 onPress={() => {
                   Alert.alert(
                     'Call Police?',
-                    'This will call emergency services (100 in India)',
+                    'This will call emergency services (100) and notify Sarthi team',
                     [
                       { text: 'Cancel', style: 'cancel' },
                       {
                         text: 'Call Now',
+                        style: 'destructive',
                         onPress: () => {
                           triggerSOS('police');
                           Linking.openURL('tel:100');
@@ -263,49 +196,24 @@ export function SOSButton({ booking, position }) {
                 }}
                 disabled={sosLoading}
               >
-                <View style={s.sosOptionIcon}>
-                  <Ionicons name="shield" size={24} color="#DC2626" />
+                <View style={[s.sosOptionIcon, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
+                  <Ionicons name="shield" size={28} color="#DC2626" />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={s.sosOptionTitle}>Call Police</Text>
+                  <Text style={[s.sosOptionTitle, { color: '#DC2626' }]}>Call Police</Text>
                   <Text style={s.sosOptionDesc}>
-                    Will call emergency services (100) and notify Sarthi
+                    Calls emergency services (100) and sends your location to Sarthi
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#D1D5DB" />
-              </TouchableOpacity>
-
-              {/* Share Live Location */}
-              <TouchableOpacity
-                style={s.sosOption}
-                onPress={shareLocation}
-                disabled={locationSharing}
-              >
-                <View style={s.sosOptionIcon}>
-                  <Ionicons name="location" size={24} color="#F59E0B" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.sosOptionTitle}>Share Live Location</Text>
-                  <Text style={s.sosOptionDesc}>
-                    Real-time location shared with Sarthi support team for 30 minutes
-                  </Text>
-                </View>
-                {locationSharing ? (
-                  <ActivityIndicator size="small" color="#6B7280" />
-                ) : (
-                  <Ionicons name="chevron-forward" size={20} color="#D1D5DB" />
-                )}
               </TouchableOpacity>
             </ScrollView>
 
             <View style={s.sosFooter}>
               <Text style={s.sosFooterText}>
-                ℹ️ Your location and booking details will be shared with the appropriate contacts
+                ℹ️ Your location and booking details will be shared automatically
               </Text>
-              <TouchableOpacity
-                style={s.cancelBtn}
-                onPress={() => setSosVisible(false)}
-              >
+              <TouchableOpacity style={s.cancelBtn} onPress={() => setSosVisible(false)}>
                 <Text style={s.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
             </View>
@@ -313,11 +221,9 @@ export function SOSButton({ booking, position }) {
         </View>
       </Modal>
 
-      {/* SOS Status Indicator - Minimal, no layout break */}
+      {/* Active SOS dot indicator */}
       {sosActive && (
-        <View style={s.sosStatusDot}>
-          <Ionicons name="alert-circle" size={16} color="#FFFFFF" />
-        </View>
+        <View style={s.sosStatusDot} />
       )}
     </>
   );
@@ -325,9 +231,9 @@ export function SOSButton({ booking, position }) {
 
 const s = StyleSheet.create({
   sosButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: '#DC2626',
     justifyContent: 'center',
     alignItems: 'center',
@@ -339,13 +245,12 @@ const s = StyleSheet.create({
   },
   sosButtonActive: {
     backgroundColor: '#991B1B',
-    shadowOpacity: 0.5,
   },
   sosButtonText: {
     color: '#FFFFFF',
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '900',
-    marginTop: 4,
+    marginTop: 2,
   },
   overlay: {
     flex: 1,
@@ -356,7 +261,7 @@ const s = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: height * 0.85,
+    maxHeight: height * 0.55,
     paddingTop: 16,
   },
   sosHeader: {
@@ -374,10 +279,7 @@ const s = StyleSheet.create({
     marginLeft: 12,
     flex: 1,
   },
-  closeBtn: {
-    padding: 8,
-    marginRight: -8,
-  },
+  closeBtn: { padding: 8, marginRight: -8 },
   sosSubtitle: {
     fontSize: 14,
     fontWeight: '600',
@@ -387,35 +289,35 @@ const s = StyleSheet.create({
   },
   sosOptions: {
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 4,
   },
   sosOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    marginBottom: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 14,
+    marginBottom: 10,
     backgroundColor: '#F9FAFB',
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: '#E5E7EB',
   },
   sosOptionIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
+    width: 52,
+    height: 52,
+    borderRadius: 14,
     backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    marginRight: 14,
     borderWidth: 1,
     borderColor: '#E5E7EB',
   },
   sosOptionTitle: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '800',
     color: '#111827',
-    marginBottom: 2,
+    marginBottom: 3,
   },
   sosOptionDesc: {
     fontSize: 12,
@@ -437,7 +339,6 @@ const s = StyleSheet.create({
   },
   cancelBtn: {
     paddingVertical: 12,
-    paddingHorizontal: 16,
     backgroundColor: '#F3F4F6',
     borderRadius: 10,
     alignItems: 'center',
@@ -447,14 +348,15 @@ const s = StyleSheet.create({
     fontWeight: '700',
     color: '#6B7280',
   },
-  // Minimal status indicator - doesn't break layout
   sosStatusDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
     backgroundColor: '#DC2626',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: -10,
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
   },
 });

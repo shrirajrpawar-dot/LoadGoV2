@@ -644,9 +644,11 @@ export default function CustomerHome() {
         {activeBooking.status === 'awaiting_payment' ? (
           <View style={styles.paymentCard}>
             <View style={styles.paymentCardHeader}>
-              <Text style={styles.paymentCardEmoji}>💳</Text>
+              <Text style={styles.paymentCardEmoji}>{activeBooking.paymentMethod === 'cod' ? '💵' : '💳'}</Text>
               <View style={{ flex: 1 }}>
-                <Text style={styles.paymentCardTitle}>Delivery Complete — Pay Now</Text>
+                <Text style={styles.paymentCardTitle}>
+                  {activeBooking.paymentMethod === 'cod' ? 'Delivery Complete — Confirm Cash Payment' : 'Delivery Complete — Pay Now'}
+                </Text>
                 <Text style={styles.paymentCardAmount}>
                   ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)}
                 </Text>
@@ -654,9 +656,42 @@ export default function CustomerHome() {
             </View>
 
             {activeBooking.paymentStatus !== 'customer_paid' && activeBooking.paymentStatus !== 'driver_confirmed' && (
-              <TouchableOpacity
-                style={styles.payUpiBtn}
-                onPress={async () => {
+              activeBooking.paymentMethod === 'cod' ? (
+                /* ─── Cash Payment Confirmation ─── */
+                <TouchableOpacity
+                  style={[styles.payUpiBtn, { backgroundColor: '#059669' }]}
+                  onPress={() => {
+                    const amount = Math.round((activeBooking.fare?.totalInPaise || 0) / 100);
+                    Alert.alert(
+                      'Confirm Cash Payment',
+                      `Did you pay ₹${amount} in cash to the driver?`,
+                      [
+                        { text: 'Not Yet', style: 'cancel' },
+                        {
+                          text: 'Yes, I Paid',
+                          onPress: async () => {
+                            try {
+                              await updateDoc(doc(db, 'bookings', activeBooking.id), {
+                                paymentStatus: 'customer_paid',
+                                customerPaidAt: new Date().toISOString(),
+                              });
+                            } catch (e) {
+                              Alert.alert('Error', e.message);
+                            }
+                          },
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Ionicons name="cash-outline" size={18} color="#FFF" />
+                  <Text style={styles.payUpiBtnText}>Confirm Cash ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)} Paid</Text>
+                </TouchableOpacity>
+              ) : (
+                /* ─── UPI Payment ─── */
+                <TouchableOpacity
+                  style={styles.payUpiBtn}
+                  onPress={async () => {
                   const driverUpi = activeBooking.driverUpiId;
                   if (!driverUpi) {
                     Alert.alert('UPI not available', 'Driver has not set up their UPI ID. Please pay in cash.');
@@ -703,12 +738,17 @@ export default function CustomerHome() {
                 <Ionicons name="card-outline" size={18} color="#FFF" />
                 <Text style={styles.payUpiBtnText}>Pay ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)} via UPI</Text>
               </TouchableOpacity>
+              )
             )}
 
             {activeBooking.paymentStatus === 'customer_paid' && (
               <View style={styles.paidConfirmPill}>
                 <Ionicons name="time-outline" size={16} color="#92400E" />
-                <Text style={styles.paidConfirmText}>You marked as paid — waiting for driver to confirm</Text>
+                <Text style={styles.paidConfirmText}>
+                  {activeBooking.paymentMethod === 'cod'
+                    ? 'Cash payment confirmed — waiting for driver to verify'
+                    : 'You marked as paid — waiting for driver to confirm'}
+                </Text>
               </View>
             )}
 

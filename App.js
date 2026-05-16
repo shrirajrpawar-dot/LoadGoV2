@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import NetInfo from '@react-native-community/netinfo';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
 import { VersionUpdateModal } from './src/components/VersionUpdateModal';
 import LoginScreen from './src/screens/auth/LoginScreen';
@@ -44,11 +46,67 @@ const TAB_STYLE = {
 };
 
 export default function App() {
+  const [networkReady, setNetworkReady] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
+  const [hasCachedUser, setHasCachedUser] = useState(false);
+
+  // Check network + cache BEFORE rendering anything
+  useEffect(() => {
+    const init = async () => {
+      try {
+        // Check network
+        const netState = await NetInfo.fetch();
+        const offline = !(netState.isConnected && netState.isInternetReachable !== false);
+        setIsOffline(offline);
+
+        // Check if user was previously logged in
+        const cachedUid = await AsyncStorage.getItem('cached_uid');
+        setHasCachedUser(!!cachedUid);
+
+        console.log('[App] Network:', offline ? 'OFFLINE' : 'ONLINE', '| Cached user:', !!cachedUid);
+      } catch (e) {
+        console.log('[App] Init error:', e);
+      }
+      setNetworkReady(true);
+    };
+
+    init();
+
+    // Listen for network changes
+    const unsubNet = NetInfo.addEventListener((state) => {
+      const offline = !(state.isConnected && state.isInternetReachable !== false);
+      setIsOffline(offline);
+    });
+
+    return () => unsubNet();
+  }, []);
+
+  // Still checking network...
+  if (!networkReady) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' }}>
+        <ActivityIndicator size="large" color="#10B981" />
+      </View>
+    );
+  }
+
+  // Offline + never logged in before → show "No Internet"
+  if (isOffline && !hasCachedUser) {
+    return (
+      <SafeAreaProvider>
+        <StatusBar style="dark" />
+        <NoInternetScreen />
+      </SafeAreaProvider>
+    );
+  }
+
+  // Online OR offline with cached user → proceed normally
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
       <AuthProvider>
         <VersionUpdateModal />
+        {isOffline && <OfflineBanner />}
         <AppContent />
       </AuthProvider>
     </SafeAreaProvider>
@@ -56,7 +114,7 @@ export default function App() {
 }
 
 function AppContent() {
-  const { user, profile, mode, loading, login, isOffline } = useAuth();
+  const { user, profile, mode, loading, login } = useAuth();
 
   if (loading) {
     return (
@@ -66,89 +124,82 @@ function AppContent() {
     );
   }
 
-  // Show "No Internet" screen if offline AND not logged in
-  if (!user && isOffline) {
-    return <NoInternetScreen />;
-  }
-
   if (!user || !profile) return <LoginScreen onLogin={login} />;
 
-  // Show offline banner on top of normal screens when user is logged in but offline
+  if (mode === 'driver' && profile?.isDriver) {
+    return (
+      <NavigationContainer>
+        <Tab.Navigator screenOptions={TAB_STYLE}>
+          <Tab.Screen
+            name="DriverHome"
+            component={DriverHome}
+            options={{
+              tabBarLabel: 'Home',
+              tabBarIcon: ({ focused, color }) => (
+                <Ionicons name={focused ? 'car' : 'car-outline'} size={20} color={color} />
+              ),
+            }}
+          />
+          <Tab.Screen
+            name="DriverEarnings"
+            component={DriverEarnings}
+            options={{
+              tabBarLabel: 'Earnings',
+              tabBarIcon: ({ focused, color }) => (
+                <Ionicons name={focused ? 'wallet' : 'wallet-outline'} size={20} color={color} />
+              ),
+            }}
+          />
+          <Tab.Screen
+            name="DriverProfile"
+            component={ProfileScreen}
+            options={{
+              tabBarLabel: 'Profile',
+              tabBarIcon: ({ focused, color }) => (
+                <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} />
+              ),
+            }}
+          />
+        </Tab.Navigator>
+      </NavigationContainer>
+    );
+  }
+
   return (
-    <>
-      {isOffline && <OfflineBanner />}
-      {mode === 'driver' && profile?.isDriver ? (
-        <NavigationContainer>
-          <Tab.Navigator screenOptions={TAB_STYLE}>
-            <Tab.Screen
-              name="DriverHome"
-              component={DriverHome}
-              options={{
-                tabBarLabel: 'Home',
-                tabBarIcon: ({ focused, color }) => (
-                  <Ionicons name={focused ? 'car' : 'car-outline'} size={20} color={color} />
-                ),
-              }}
-            />
-            <Tab.Screen
-              name="DriverEarnings"
-              component={DriverEarnings}
-              options={{
-                tabBarLabel: 'Earnings',
-                tabBarIcon: ({ focused, color }) => (
-                  <Ionicons name={focused ? 'wallet' : 'wallet-outline'} size={20} color={color} />
-                ),
-              }}
-            />
-            <Tab.Screen
-              name="DriverProfile"
-              component={ProfileScreen}
-              options={{
-                tabBarLabel: 'Profile',
-                tabBarIcon: ({ focused, color }) => (
-                  <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} />
-                ),
-              }}
-            />
-          </Tab.Navigator>
-        </NavigationContainer>
-      ) : (
-        <NavigationContainer>
-          <Tab.Navigator screenOptions={TAB_STYLE}>
-            <Tab.Screen
-              name="Home"
-              component={CustomerHome}
-              options={{
-                tabBarLabel: 'Home',
-                tabBarIcon: ({ focused, color }) => (
-                  <Ionicons name={focused ? 'home' : 'home-outline'} size={20} color={color} />
-                ),
-              }}
-            />
-            <Tab.Screen
-              name="Bookings"
-              component={CustomerBookingsScreen}
-              options={{
-                tabBarLabel: 'Bookings',
-                tabBarIcon: ({ focused, color }) => (
-                  <Ionicons name={focused ? 'receipt' : 'receipt-outline'} size={20} color={color} />
-                ),
-              }}
-            />
-            <Tab.Screen
-              name="Profile"
-              component={ProfileScreen}
-              options={{
-                tabBarLabel: 'Profile',
-                tabBarIcon: ({ focused, color }) => (
-                  <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} />
-                ),
-              }}
-            />
-          </Tab.Navigator>
-        </NavigationContainer>
-      )}
-    </>
+    <NavigationContainer>
+      <Tab.Navigator screenOptions={TAB_STYLE}>
+        <Tab.Screen
+          name="Home"
+          component={CustomerHome}
+          options={{
+            tabBarLabel: 'Home',
+            tabBarIcon: ({ focused, color }) => (
+              <Ionicons name={focused ? 'home' : 'home-outline'} size={20} color={color} />
+            ),
+          }}
+        />
+        <Tab.Screen
+          name="Bookings"
+          component={CustomerBookingsScreen}
+          options={{
+            tabBarLabel: 'Bookings',
+            tabBarIcon: ({ focused, color }) => (
+              <Ionicons name={focused ? 'receipt' : 'receipt-outline'} size={20} color={color} />
+            ),
+          }}
+        />
+        <Tab.Screen
+          name="Profile"
+          component={ProfileScreen}
+          options={{
+            tabBarLabel: 'Profile',
+            tabBarIcon: ({ focused, color }) => (
+              <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} />
+            ),
+          }}
+        />
+      </Tab.Navigator>
+    </NavigationContainer>
   );
 }
 
@@ -175,7 +226,7 @@ function NoInternetScreen() {
   );
 }
 
-// ─── Offline Banner (shown on top when logged in but offline) ────
+// ─── Offline Banner ─────────────────────
 function OfflineBanner() {
   return (
     <View style={offlineStyles.banner}>
