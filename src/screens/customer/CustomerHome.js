@@ -18,7 +18,7 @@ import {
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
-import { addDoc, collection, serverTimestamp, doc, onSnapshot, updateDoc } from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp, doc, onSnapshot, updateDoc, query, where, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, auth, GOOGLE_MAPS_API_KEY } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
@@ -140,6 +140,50 @@ export default function CustomerHome() {
       } catch {}
     })();
   }, []);
+
+  // ── Auto-cancel stale "searching" bookings + resume active ones on mount ──
+  useEffect(() => {
+    if (!user?.uid) return;
+    const checkStaleBookings = async () => {
+      try {
+        // Cancel ALL "searching" bookings — user closed app, driver should not see them
+        const qSearching = query(
+          collection(db, 'bookings'),
+          where('customerId', '==', user.uid),
+          where('status', '==', 'searching')
+        );
+        const snapSearching = await getDocs(qSearching);
+        for (const docSnap of snapSearching.docs) {
+          console.log('[Booking] Auto-cancelling stale booking:', docSnap.id);
+          await updateDoc(doc(db, 'bookings', docSnap.id), {
+            status: 'cancelled',
+            cancelledBy: 'system_auto',
+            cancelledAt: new Date().toISOString(),
+            cancelReason: 'Customer closed app while searching for driver',
+          });
+        }
+
+        // Resume any active bookings (driver already accepted)
+        const activeStatuses = ['accepted', 'arrived', 'picked_up', 'reached', 'reached_dropoff', 'awaiting_payment'];
+        const qActive = query(
+          collection(db, 'bookings'),
+          where('customerId', '==', user.uid),
+          where('status', 'in', activeStatuses)
+        );
+        const snapActive = await getDocs(qActive);
+        if (snapActive.size > 0) {
+          const activeDoc = snapActive.docs[0];
+          console.log('[Booking] Resuming active booking:', activeDoc.id, activeDoc.data().status);
+          setCurrentBookingId(activeDoc.id);
+          setBookingPhase('active');
+        }
+      } catch (e) {
+        console.log('[Booking] Stale check error:', e);
+      }
+    };
+
+    checkStaleBookings();
+  }, [user?.uid]);
 
   useEffect(() => {
     if (bookingPhase === 'fare' && pickupLocation && dropLocation && mapRef.current) {

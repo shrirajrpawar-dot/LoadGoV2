@@ -376,12 +376,15 @@ export default function DriverHome() {
       if (type === 'pickup') {
         await updateDoc(doc(db, 'bookings', currentBooking.id), { status: 'picked_up' });
       } else {
-        // Check if UPI payment is pending before completing
+        // Check if payment is pending before completing
         const isUpi = currentBooking.paymentMethod === 'upi_direct' || currentBooking.paymentMethod === 'upi';
-        const isPaid = currentBooking.paymentStatus === 'driver_confirmed';
         const isCod = currentBooking.paymentMethod === 'cod' || !currentBooking.paymentMethod;
+        const isPaid = currentBooking.paymentStatus === 'driver_confirmed';
 
-        if (isUpi && !isPaid) {
+        if (isPaid) {
+          // Already confirmed — complete immediately
+          await completeBooking(currentBooking);
+        } else if (isUpi) {
           // UPI not yet confirmed — park in awaiting_payment
           await updateDoc(doc(db, 'bookings', currentBooking.id), {
             status: 'awaiting_payment',
@@ -391,8 +394,18 @@ export default function DriverHome() {
             "Delivery Verified!",
             "Now confirm you've received the UPI payment to complete this trip."
           );
+        } else if (isCod) {
+          // Cash — park in awaiting_payment, wait for cash collection confirmation
+          await updateDoc(doc(db, 'bookings', currentBooking.id), {
+            status: 'awaiting_payment',
+            deliveryOtpVerifiedAt: serverTimestamp(),
+          });
+          Alert.alert(
+            "Delivery Verified!",
+            "Collect the cash payment from the customer and confirm below."
+          );
         } else {
-          // Cash or already-paid UPI or Razorpay — complete immediately
+          // Razorpay or other — complete immediately
           await completeBooking(currentBooking);
         }
       }
@@ -574,7 +587,8 @@ export default function DriverHome() {
                         paymentStatus: 'driver_confirmed',
                         paymentConfirmedAt: serverTimestamp(),
                       });
-                      Alert.alert('✓ Payment Confirmed', 'Marked as received.');
+                      // Complete booking after payment confirmed
+                      await completeBooking(currentBooking);
                     } catch (e) {
                       Alert.alert('Error', e.message);
                     }
@@ -592,6 +606,55 @@ export default function DriverHome() {
                 <Text style={s.paymentBannerSub}>
                   ℹ️ This is a UPI booking. Customer will pay you directly when ready.
                 </Text>
+              </View>
+            )}
+
+            {/* Cash payment confirmation banner */}
+            {(currentBooking.paymentMethod === 'cod' || !currentBooking.paymentMethod) &&
+             currentBooking.status === 'awaiting_payment' &&
+             currentBooking.paymentStatus !== 'driver_confirmed' && (
+              <View style={s.paymentBanner}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.paymentBannerTitle}>💵 Collect Cash Payment</Text>
+                  <Text style={s.paymentBannerSub}>
+                    Collect ₹{Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} cash from {currentBooking.customerName || 'customer'}
+                  </Text>
+                  {currentBooking.paymentStatus === 'customer_paid' && (
+                    <Text style={{ fontSize: 11, color: '#059669', fontWeight: '700', marginTop: 4 }}>
+                      ✓ Customer confirmed they paid
+                    </Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={[s.paymentConfirmBtn, { backgroundColor: '#059669' }]}
+                  onPress={() => {
+                    Alert.alert(
+                      'Confirm Cash Received',
+                      `Did you receive ₹${Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} cash from the customer?`,
+                      [
+                        { text: 'No', style: 'cancel' },
+                        {
+                          text: 'Yes, Received',
+                          onPress: async () => {
+                            try {
+                              await updateDoc(doc(db, 'bookings', currentBooking.id), {
+                                paymentStatus: 'driver_confirmed',
+                                paymentConfirmedAt: serverTimestamp(),
+                                cashCollectedByDriver: true,
+                              });
+                              // Now complete the booking
+                              await completeBooking(currentBooking);
+                            } catch (e) {
+                              Alert.alert('Error', e.message);
+                            }
+                          },
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Text style={s.paymentConfirmBtnTxt}>Cash Received</Text>
+                </TouchableOpacity>
               </View>
             )}
 

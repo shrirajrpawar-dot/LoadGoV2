@@ -1,11 +1,12 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import {
   signInAnonymously,
   onAuthStateChanged,
   signOut as firebaseSignOut,
 } from 'firebase/auth';
-import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, getDocs, onSnapshot, setDoc, updateDoc, collection, query, where } from 'firebase/firestore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
 import { auth, db } from '../../firebase';
 
 const AuthContext = createContext();
@@ -16,7 +17,47 @@ export function AuthProvider({ children }) {
   const [driverDoc, setDriverDoc] = useState(null);
   const [mode, setMode] = useState('customer');
   const [loading, setLoading] = useState(true);
+  const [isOffline, setIsOffline] = useState(false);
+  const hasTriedReauth = useRef(false);
 
+  // ── Load cache immediately ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const [uid, prof, drv] = await Promise.all([
+          AsyncStorage.getItem('cached_uid'),
+          AsyncStorage.getItem('cached_profile'),
+          AsyncStorage.getItem('cached_driverDoc'),
+        ]);
+        if (uid && prof) {
+          const p = JSON.parse(prof);
+          setUser({ uid, isOfflineCached: true });
+          setProfile(p);
+          setMode(p.mode || 'customer');
+          if (drv) setDriverDoc(JSON.parse(drv));
+        }
+      } catch (e) {}
+    })();
+  }, []);
+
+  // ── Network monitoring + re-auth on reconnect ──
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener(async (state) => {
+      const offline = !(state.isConnected && state.isInternetReachable !== false);
+      setIsOffline(offline);
+      if (!offline && !auth.currentUser && !hasTriedReauth.current) {
+        const uid = await AsyncStorage.getItem('cached_uid').catch(() => null);
+        if (uid) {
+          hasTriedReauth.current = true;
+          try { await signInAnonymously(auth); } catch (e) {}
+          hasTriedReauth.current = false;
+        }
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // ── Firebase auth listener ──
   useEffect(() => {
     let unsubProfile = null;
     let unsubDriver = null;
@@ -27,11 +68,8 @@ export function AuthProvider({ children }) {
 
       if (firebaseUser) {
         setUser(firebaseUser);
+        AsyncStorage.setItem('cached_uid', firebaseUser.uid).catch(() => {});
 
-        // Cache UID
-        try { await AsyncStorage.setItem('cached_uid', firebaseUser.uid); } catch (e) {}
-
-        // Real-time user profile
         unsubProfile = onSnapshot(
           doc(db, 'users', firebaseUser.uid),
           (snap) => {
@@ -46,14 +84,9 @@ export function AuthProvider({ children }) {
             }
             setLoading(false);
           },
-          async (err) => {
-            console.error('Profile error:', err);
-            // Firestore offline — load cached
-            await loadCachedData();
-          }
+          () => setLoading(false)
         );
 
-        // Real-time driver doc
         unsubDriver = onSnapshot(
           doc(db, 'drivers', firebaseUser.uid),
           (snap) => {
@@ -64,56 +97,87 @@ export function AuthProvider({ children }) {
           () => {}
         );
       } else {
-        // No Firebase user — try re-auth or use cache
         try {
-          const cachedUid = await AsyncStorage.getItem('cached_uid');
-          if (cachedUid) {
-            try {
-              await signInAnonymously(auth);
-              return; // onAuthStateChanged fires again
-            } catch (e) {
-              // Can't re-auth — use cached data
-              setUser({ uid: cachedUid, isOfflineCached: true });
-              await loadCachedData();
-              return;
-            }
+          const uid = await AsyncStorage.getItem('cached_uid');
+          if (uid) {
+            try { await signInAnonymously(auth); return; }
+            catch (e) { setLoading(false); return; }
           }
         } catch (e) {}
-
-        setUser(null);
-        setProfile(null);
-        setDriverDoc(null);
-        setMode('customer');
+        setUser(null); setProfile(null); setDriverDoc(null); setMode('customer');
         setLoading(false);
       }
     });
 
-    return () => {
-      unsubAuth();
-      if (unsubProfile) unsubProfile();
-      if (unsubDriver) unsubDriver();
-    };
+    const timeout = setTimeout(() => setLoading(false), 4000);
+    return () => { clearTimeout(timeout); unsubAuth(); if (unsubProfile) unsubProfile(); if (unsubDriver) unsubDriver(); };
   }, []);
 
-  const loadCachedData = async () => {
+  // ── Check if phone exists in Firestore ──
+  const checkPhone = async (phone) => {
     try {
-      const cp = await AsyncStorage.getItem('cached_profile');
-      if (cp) { const d = JSON.parse(cp); setProfile(d); setMode(d.mode || 'customer'); }
-      const cd = await AsyncStorage.getItem('cached_driverDoc');
-      if (cd) setDriverDoc(JSON.parse(cd));
-    } catch (e) {}
-    setLoading(false);
+      const q = query(collection(db, 'users'), where('phone', '==', phone));
+      const snap = await getDocs(q);
+      if (snap.empty) return null;
+      // Return first matching user's data + their doc ID (old UID)
+      const userDoc = snap.docs[0];
+      return { id: userDoc.id, ...userDoc.data() };
+    } catch (e) {
+      console.error('[Auth] checkPhone error:', e);
+      return null;
+    }
   };
 
-  const login = async (name, email, phone) => {
+  // ── Login: handles both existing and new users ──
+  const login = async (name, email, phone, existingUser) => {
     const result = await signInAnonymously(auth);
-    await setDoc(doc(db, 'users', result.user.uid), {
-      uid: result.user.uid,
-      name, email, phone,
-      mode: 'customer',
-      isDriver: false,
-      createdAt: new Date().toISOString(),
-    });
+    const newUid = result.user.uid;
+
+    if (existingUser && existingUser.id) {
+      // Existing user — migrate data to new UID
+      const oldUid = existingUser.id;
+      const userData = {
+        uid: newUid,
+        name: existingUser.name || name,
+        email: existingUser.email || email,
+        phone,
+        mode: existingUser.mode || 'customer',
+        isDriver: existingUser.isDriver || false,
+        createdAt: existingUser.createdAt || new Date().toISOString(),
+        migratedFrom: oldUid,
+        lastLoginAt: new Date().toISOString(),
+      };
+
+      // Create user doc at new UID
+      await setDoc(doc(db, 'users', newUid), userData);
+
+      // If driver, migrate driver doc too
+      if (existingUser.isDriver) {
+        try {
+          const oldDriverSnap = await getDoc(doc(db, 'drivers', oldUid));
+          if (oldDriverSnap.exists()) {
+            const driverData = oldDriverSnap.data();
+            await setDoc(doc(db, 'drivers', newUid), {
+              ...driverData,
+              uid: newUid,
+              migratedFrom: oldUid,
+            });
+          }
+        } catch (e) {
+          console.log('[Auth] Driver migration skipped:', e.message);
+        }
+      }
+    } else {
+      // New user — create fresh user doc
+      await setDoc(doc(db, 'users', newUid), {
+        uid: newUid,
+        name, email, phone,
+        mode: 'customer',
+        isDriver: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
     return result.user;
   };
 
@@ -150,8 +214,8 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider value={{
-      user, profile, driverDoc, mode, loading,
-      login, signOut, joinAsDriver, switchMode,
+      user, profile, driverDoc, mode, loading, isOffline,
+      login, checkPhone, signOut, joinAsDriver, switchMode,
     }}>
       {children}
     </AuthContext.Provider>
