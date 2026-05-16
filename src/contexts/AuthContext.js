@@ -6,6 +6,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
 import { auth, db } from '../../firebase';
 
 const AuthContext = createContext();
@@ -16,6 +17,17 @@ export function AuthProvider({ children }) {
   const [driverDoc, setDriverDoc] = useState(null);
   const [mode, setMode] = useState('customer');
   const [loading, setLoading] = useState(true);
+  const [isOffline, setIsOffline] = useState(false);
+
+  // Monitor network connectivity
+  useEffect(() => {
+    const unsubNet = NetInfo.addEventListener((state) => {
+      const offline = !(state.isConnected && state.isInternetReachable !== false);
+      setIsOffline(offline);
+      console.log('[Auth] Network:', offline ? 'OFFLINE' : 'ONLINE');
+    });
+    return () => unsubNet();
+  }, []);
 
   useEffect(() => {
     let unsubProfile = null;
@@ -29,7 +41,7 @@ export function AuthProvider({ children }) {
       if (firebaseUser) {
         setUser(firebaseUser);
 
-        // Cache user UID for offline use
+        // Cache UID for offline recovery
         try {
           await AsyncStorage.setItem('cached_uid', firebaseUser.uid);
         } catch (e) {}
@@ -42,7 +54,7 @@ export function AuthProvider({ children }) {
               const data = snap.data();
               setProfile(data);
               setMode(data.mode || 'customer');
-              // Cache profile for offline
+              // Cache for offline
               AsyncStorage.setItem('cached_profile', JSON.stringify(data)).catch(() => {});
             } else {
               setProfile(null);
@@ -52,8 +64,8 @@ export function AuthProvider({ children }) {
           },
           (err) => {
             console.error('Profile listener error:', err);
-            // Firestore offline — load cached profile
-            loadCachedProfile();
+            // Firestore offline — load cached
+            loadCachedData();
           }
         );
 
@@ -70,28 +82,28 @@ export function AuthProvider({ children }) {
           () => {}
         );
       } else {
-        // No Firebase user — check cached data (offline scenario)
+        // No Firebase user — try cached data for offline
         try {
           const cachedUid = await AsyncStorage.getItem('cached_uid');
           if (cachedUid) {
-            // Try to re-authenticate silently
+            // Try re-auth silently
             try {
               await signInAnonymously(auth);
-              // onAuthStateChanged will fire again with the new user
+              // onAuthStateChanged will fire again
               return;
             } catch (authError) {
-              // Can't re-auth (offline) — use cached data
-              console.log('[Auth] Offline mode, using cached data');
+              // Offline — use cached data
+              console.log('[Auth] Offline, using cached data');
               setUser({ uid: cachedUid, isOfflineCached: true });
-              await loadCachedProfile();
+              await loadCachedData();
               return;
             }
           }
         } catch (e) {
-          console.error('[Auth] Cache read error:', e);
+          console.error('[Auth] Cache error:', e);
         }
 
-        // No cached user — show login screen
+        // No cached user — show login
         setUser(null);
         setProfile(null);
         setDriverDoc(null);
@@ -107,7 +119,7 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
-  const loadCachedProfile = async () => {
+  const loadCachedData = async () => {
     try {
       const cachedProfile = await AsyncStorage.getItem('cached_profile');
       if (cachedProfile) {
@@ -143,7 +155,7 @@ export function AuthProvider({ children }) {
       isDriver: true,
       mode: 'driver',
     });
-    // Only create driver doc if it doesn't exist — don't overwrite earnings/KYC
+    // Only create driver doc if it doesn't exist
     const driverRef = doc(db, 'drivers', user.uid);
     const driverSnap = await getDoc(driverRef);
     if (!driverSnap.exists()) {
@@ -180,7 +192,7 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider value={{
-      user, profile, driverDoc, mode, loading,
+      user, profile, driverDoc, mode, loading, isOffline,
       login, signOut, joinAsDriver, switchMode,
     }}>
       {children}
