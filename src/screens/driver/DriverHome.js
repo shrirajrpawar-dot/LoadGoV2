@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   Alert, ActivityIndicator, Switch, ScrollView, TextInput, Linking, Animated, Platform, Dimensions,
-  KeyboardAvoidingView
+  KeyboardAvoidingView, Vibration,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
@@ -13,6 +13,7 @@ import {
   doc, updateDoc, getDoc, serverTimestamp, arrayUnion, addDoc,
   runTransaction, increment,
 } from 'firebase/firestore';
+import { sendLocalNotification } from '../../hooks/useNotifications';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
@@ -144,6 +145,34 @@ export default function DriverHome() {
 
     return () => { unsubDriver(); unsubSearching(); unsubMine(); };
   }, [user?.uid, isOnline, driverDoc?.vehicle?.type]);
+
+  // ── Alert driver when NEW booking arrives ──
+  const prevBookingCount = useRef(0);
+  useEffect(() => {
+    if (!isOnline || !currentBooking) {
+      // Only alert for new bookings when online and not on a trip
+      const count = availableBookings.length;
+      if (count > prevBookingCount.current && prevBookingCount.current >= 0) {
+        const newCount = count - prevBookingCount.current;
+        if (newCount > 0 && prevBookingCount.current > 0) {
+          // New booking arrived — vibrate + local notification
+          Vibration.vibrate([0, 400, 200, 400, 200, 400]); // 3 pulses
+
+          const newest = availableBookings[0];
+          const pickup = newest?.pickup?.address || 'Nearby';
+          const drop = newest?.drop?.address || '';
+          const fare = newest?.fare?.totalInPaise ? `₹${Math.round(newest.fare.totalInPaise / 100)}` : '';
+
+          sendLocalNotification(
+            '🚚 New Trip Request!',
+            `${pickup}${drop ? ' → ' + drop : ''} ${fare}`.trim(),
+            { type: 'new_booking', bookingId: newest?.id }
+          );
+        }
+      }
+      prevBookingCount.current = count;
+    }
+  }, [availableBookings.length, isOnline, currentBooking]);
 
   // Live driver location: update Firestore only when moved 100m+
   const lastWrittenLocation = useRef(null);

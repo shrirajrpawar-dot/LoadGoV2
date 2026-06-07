@@ -7,6 +7,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
 import { VersionUpdateModal } from './src/components/VersionUpdateModal';
+import { useNotifications } from './src/hooks/useNotifications';
 import LoginScreen from './src/screens/auth/LoginScreen';
 import CustomerHome from './src/screens/customer/CustomerHome';
 import CustomerBookingsScreen from './src/screens/customer/CustomerBookingsScreen';
@@ -51,6 +52,7 @@ export default function App() {
 
 function AppContent() {
   const { user, profile, mode, loading, login, checkPhone, isOffline } = useAuth();
+  useNotifications(); // Register push token + handle incoming notifications
   const [reconnecting, setReconnecting] = useState(false);
   const wasOffline = useRef(false);
 
