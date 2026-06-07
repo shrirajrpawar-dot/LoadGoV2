@@ -1,0 +1,45 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch: # Manual trigger from GitHub
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install notification packages
+        run: npm install expo-device@6.0.2 expo-modules-core@1.12.26 expo-notifications@0.28.19
+
+      - name: Patch Gradle bug
+        run: |
+          sed -i 's/from components\.release/try { from components.release } catch (Exception e) { }/' node_modules/expo-modules-core/android/ExpoModulesCorePlugin.gradle
+
+      - name: Generate Android project
+        run: npx expo prebuild --clean --platform android
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sarthi-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
