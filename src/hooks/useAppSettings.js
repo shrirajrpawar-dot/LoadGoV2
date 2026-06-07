@@ -36,6 +36,7 @@ export const useAppSettings = () => {
     upiId: 'sarthi@upi',
     appName: 'Sarthi',
     searchRadiusKm: 5,
+    maxOwedCommission: 500,
     paymentMethods: DEFAULT_PAYMENT_METHODS,
     razorpayKeyId: '',
   });
@@ -61,7 +62,7 @@ export const useAppSettings = () => {
           upiId: data.upiId || 'sarthi@upi',
           appName: data.appName || 'Sarthi',
           searchRadiusKm: data.searchRadiusKm || 5,
-          // Merge payment methods with defaults so a method missing from Firestore stays disabled
+          maxOwedCommission: data.maxOwedCommission ?? 500,
           paymentMethods: { ...DEFAULT_PAYMENT_METHODS, ...(data.paymentMethods || {}) },
           razorpayKeyId: data.razorpayKeyId || '',
         });
@@ -73,6 +74,7 @@ export const useAppSettings = () => {
           upiId: 'sarthi@upi',
           appName: 'Sarthi',
           searchRadiusKm: 5,
+          maxOwedCommission: 500,
           paymentMethods: DEFAULT_PAYMENT_METHODS,
           razorpayKeyId: '',
         });

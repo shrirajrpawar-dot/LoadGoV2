@@ -18,11 +18,12 @@ import {
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
-import { addDoc, collection, serverTimestamp, doc, onSnapshot, updateDoc } from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp, doc, onSnapshot, updateDoc, query, where, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, auth, GOOGLE_MAPS_API_KEY } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
+import { SOSButton } from '../../components/SOSButton';
 
 const { width, height } = Dimensions.get('window');
 const GOOGLE_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY;
@@ -139,6 +140,50 @@ export default function CustomerHome() {
       } catch {}
     })();
   }, []);
+
+  // ── Auto-cancel stale "searching" bookings + resume active ones on mount ──
+  useEffect(() => {
+    if (!user?.uid) return;
+    const checkStaleBookings = async () => {
+      try {
+        // Cancel ALL "searching" bookings — user closed app, driver should not see them
+        const qSearching = query(
+          collection(db, 'bookings'),
+          where('customerId', '==', user.uid),
+          where('status', '==', 'searching')
+        );
+        const snapSearching = await getDocs(qSearching);
+        for (const docSnap of snapSearching.docs) {
+          console.log('[Booking] Auto-cancelling stale booking:', docSnap.id);
+          await updateDoc(doc(db, 'bookings', docSnap.id), {
+            status: 'cancelled',
+            cancelledBy: 'system_auto',
+            cancelledAt: new Date().toISOString(),
+            cancelReason: 'Customer closed app while searching for driver',
+          });
+        }
+
+        // Resume any active bookings (driver already accepted)
+        const activeStatuses = ['accepted', 'arrived', 'picked_up', 'reached', 'reached_dropoff', 'awaiting_payment'];
+        const qActive = query(
+          collection(db, 'bookings'),
+          where('customerId', '==', user.uid),
+          where('status', 'in', activeStatuses)
+        );
+        const snapActive = await getDocs(qActive);
+        if (snapActive.size > 0) {
+          const activeDoc = snapActive.docs[0];
+          console.log('[Booking] Resuming active booking:', activeDoc.id, activeDoc.data().status);
+          setCurrentBookingId(activeDoc.id);
+          setBookingPhase('active');
+        }
+      } catch (e) {
+        console.log('[Booking] Stale check error:', e);
+      }
+    };
+
+    checkStaleBookings();
+  }, [user?.uid]);
 
   useEffect(() => {
     if (bookingPhase === 'fare' && pickupLocation && dropLocation && mapRef.current) {
@@ -313,7 +358,7 @@ export default function CustomerHome() {
         pickup: pickupLocation, drop: dropLocation,
         itemsDescription: serviceType === 'parcel' ? itemsDescription.trim() : '',
         paymentMethod, distanceKm: fareQuote.distanceKm, fare: fareQuote.fare,
-        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'cod' ? 'pending_from_driver' : 'collected' },
+        commission: { amountInPaise: quoteCommission.amountInPaise || 0, pct: quoteCommission.pct || 0, status: paymentMethod === 'razorpay' ? 'collected' : 'pending_from_driver' },
         // Payment status: cod gets confirmed at delivery; upi/razorpay before
         paymentStatus: 'pending', // pending → customer_paid → driver_confirmed
         status: 'searching', 
@@ -638,12 +683,16 @@ export default function CustomerHome() {
           </TouchableOpacity>
         </View>
 
+        <ScrollView style={{ flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+
         {activeBooking.status === 'awaiting_payment' ? (
           <View style={styles.paymentCard}>
             <View style={styles.paymentCardHeader}>
-              <Text style={styles.paymentCardEmoji}>💳</Text>
+              <Text style={styles.paymentCardEmoji}>{activeBooking.paymentMethod === 'cod' ? '💵' : '💳'}</Text>
               <View style={{ flex: 1 }}>
-                <Text style={styles.paymentCardTitle}>Delivery Complete — Pay Now</Text>
+                <Text style={styles.paymentCardTitle}>
+                  {activeBooking.paymentMethod === 'cod' ? 'Delivery Complete — Confirm Cash Payment' : 'Delivery Complete — Pay Now'}
+                </Text>
                 <Text style={styles.paymentCardAmount}>
                   ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)}
                 </Text>
@@ -651,9 +700,42 @@ export default function CustomerHome() {
             </View>
 
             {activeBooking.paymentStatus !== 'customer_paid' && activeBooking.paymentStatus !== 'driver_confirmed' && (
-              <TouchableOpacity
-                style={styles.payUpiBtn}
-                onPress={async () => {
+              activeBooking.paymentMethod === 'cod' ? (
+                /* ─── Cash Payment Confirmation ─── */
+                <TouchableOpacity
+                  style={[styles.payUpiBtn, { backgroundColor: '#059669' }]}
+                  onPress={() => {
+                    const amount = Math.round((activeBooking.fare?.totalInPaise || 0) / 100);
+                    Alert.alert(
+                      'Confirm Cash Payment',
+                      `Did you pay ₹${amount} in cash to the driver?`,
+                      [
+                        { text: 'Not Yet', style: 'cancel' },
+                        {
+                          text: 'Yes, I Paid',
+                          onPress: async () => {
+                            try {
+                              await updateDoc(doc(db, 'bookings', activeBooking.id), {
+                                paymentStatus: 'customer_paid',
+                                customerPaidAt: new Date().toISOString(),
+                              });
+                            } catch (e) {
+                              Alert.alert('Error', e.message);
+                            }
+                          },
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Ionicons name="cash-outline" size={18} color="#FFF" />
+                  <Text style={styles.payUpiBtnText}>Confirm Cash ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)} Paid</Text>
+                </TouchableOpacity>
+              ) : (
+                /* ─── UPI Payment ─── */
+                <TouchableOpacity
+                  style={styles.payUpiBtn}
+                  onPress={async () => {
                   const driverUpi = activeBooking.driverUpiId;
                   if (!driverUpi) {
                     Alert.alert('UPI not available', 'Driver has not set up their UPI ID. Please pay in cash.');
@@ -700,12 +782,17 @@ export default function CustomerHome() {
                 <Ionicons name="card-outline" size={18} color="#FFF" />
                 <Text style={styles.payUpiBtnText}>Pay ₹{Math.round((activeBooking.fare?.totalInPaise || 0) / 100)} via UPI</Text>
               </TouchableOpacity>
+              )
             )}
 
             {activeBooking.paymentStatus === 'customer_paid' && (
               <View style={styles.paidConfirmPill}>
                 <Ionicons name="time-outline" size={16} color="#92400E" />
-                <Text style={styles.paidConfirmText}>You marked as paid — waiting for driver to confirm</Text>
+                <Text style={styles.paidConfirmText}>
+                  {activeBooking.paymentMethod === 'cod'
+                    ? 'Cash payment confirmed — waiting for driver to verify'
+                    : 'You marked as paid — waiting for driver to confirm'}
+                </Text>
               </View>
             )}
 
@@ -769,6 +856,7 @@ export default function CustomerHome() {
             {actionLoading ? <ActivityIndicator color="#EF4444" /> : <Text style={styles.cancelBtnText}>Cancel Booking</Text>}
           </TouchableOpacity>
         )}
+        </ScrollView>
       </View>
     );
   };
@@ -846,6 +934,13 @@ export default function CustomerHome() {
         {bookingPhase === 'fare' ? renderFarePhase() : null}
         {bookingPhase === 'active' ? renderActiveBooking() : null}
       </KeyboardAvoidingView>
+
+      {/* SOS Button - Top Right, Active Booking Only */}
+      {currentBookingId && activeBooking && bookingPhase === 'active' && (
+        <View style={{ position: 'absolute', top: 80, right: 20, zIndex: 100 }}>
+          <SOSButton booking={activeBooking} position={mapMarker} />
+        </View>
+      )}
     </View>
   );
 }
@@ -869,7 +964,7 @@ const styles = StyleSheet.create({
   locateBtn: { position: 'absolute', right: 16, top: -60, width: 46, height: 46, borderRadius: 23, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 10, zIndex: 100 },
   markerPin: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', borderWidth: 2.5, borderColor: '#FFF', shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 4, elevation: 4 },
   bottomSheetWrapper: { position: 'absolute', bottom: 0, left: 0, right: 0 },
-  bottomSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, maxHeight: height * 0.45, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.06, shadowRadius: 12, elevation: 16 },
+  bottomSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 14, paddingBottom: Platform.OS === 'ios' ? 24 : 14, maxHeight: height * 0.55, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.06, shadowRadius: 12, elevation: 16 },
   fareSheetContainer: { height: height * 0.65, backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, shadowColor: '#000', shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 20 },
   sheetHeaderFixed: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 20, marginBottom: 16 },
   sheetTitleFixed: { fontSize: 22, fontWeight: '800', color: '#111827' },

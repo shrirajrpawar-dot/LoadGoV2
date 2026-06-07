@@ -1,11 +1,13 @@
-import React from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { ActivityIndicator, View, Text, Platform } from 'react-native';
+import { ActivityIndicator, View, Text, StyleSheet, Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
+import { VersionUpdateModal } from './src/components/VersionUpdateModal';
+import { useNotifications } from './src/hooks/useNotifications';
 import LoginScreen from './src/screens/auth/LoginScreen';
 import CustomerHome from './src/screens/customer/CustomerHome';
 import CustomerBookingsScreen from './src/screens/customer/CustomerBookingsScreen';
@@ -32,14 +34,8 @@ const TAB_STYLE = {
     shadowOpacity: 0.06,
     shadowRadius: 6,
   },
-  tabBarLabelStyle: {
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  tabBarIconStyle: {
-    marginBottom: -2,
-  },
+  tabBarLabelStyle: { fontSize: 11, fontWeight: '700', marginTop: 2 },
+  tabBarIconStyle: { marginBottom: -2 },
 };
 
 export default function App() {
@@ -47,6 +43,7 @@ export default function App() {
     <SafeAreaProvider>
       <StatusBar style="dark" />
       <AuthProvider>
+        <VersionUpdateModal />
         <AppContent />
       </AuthProvider>
     </SafeAreaProvider>
@@ -54,91 +51,102 @@ export default function App() {
 }
 
 function AppContent() {
-  const { user, profile, mode, loading, login } = useAuth();
+  const { user, profile, mode, loading, login, checkPhone, isOffline } = useAuth();
+  useNotifications(); // Register push token + handle incoming notifications
+  const [reconnecting, setReconnecting] = useState(false);
+  const wasOffline = useRef(false);
 
-  if (loading) {
+  useEffect(() => {
+    if (isOffline) {
+      wasOffline.current = true;
+    } else if (wasOffline.current) {
+      wasOffline.current = false;
+      setReconnecting(true);
+      const t = setTimeout(() => setReconnecting(false), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [isOffline]);
+
+  useEffect(() => {
+    if (reconnecting && user && profile) setReconnecting(false);
+  }, [reconnecting, user, profile]);
+
+  if (loading || reconnecting) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' }}>
         <ActivityIndicator size="large" color="#10B981" />
+        {reconnecting && <Text style={{ marginTop: 16, fontSize: 14, color: '#6B7280', fontWeight: '600' }}>Reconnecting...</Text>}
       </View>
     );
   }
 
-  if (!user || !profile) return <LoginScreen onLogin={login} />;
+  if ((!user || !profile) && isOffline) return <NoInternetScreen />;
 
-  if (mode === 'driver' && profile?.isDriver) {
-    return (
-      <NavigationContainer>
-        <Tab.Navigator screenOptions={TAB_STYLE}>
-          <Tab.Screen
-            name="DriverHome"
-            component={DriverHome}
-            options={{
-              tabBarLabel: 'Home',
-              tabBarIcon: ({ focused, color }) => (
-                <Ionicons name={focused ? 'car' : 'car-outline'} size={20} color={color} />
-              ),
-            }}
-          />
-          <Tab.Screen
-            name="DriverEarnings"
-            component={DriverEarnings}
-            options={{
-              tabBarLabel: 'Earnings',
-              tabBarIcon: ({ focused, color }) => (
-                <Ionicons name={focused ? 'wallet' : 'wallet-outline'} size={20} color={color} />
-              ),
-            }}
-          />
-          <Tab.Screen
-            name="DriverProfile"
-            component={ProfileScreen}
-            options={{
-              tabBarLabel: 'Profile',
-              tabBarIcon: ({ focused, color }) => (
-                <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} />
-              ),
-            }}
-          />
-        </Tab.Navigator>
-      </NavigationContainer>
-    );
-  }
+  if (!user || !profile) return <LoginScreen onLogin={login} onCheckPhone={checkPhone} />;
 
   return (
-    <NavigationContainer>
-      <Tab.Navigator screenOptions={TAB_STYLE}>
-        <Tab.Screen
-          name="Home"
-          component={CustomerHome}
-          options={{
-            tabBarLabel: 'Home',
-            tabBarIcon: ({ focused, color }) => (
-              <Ionicons name={focused ? 'home' : 'home-outline'} size={20} color={color} />
-            ),
-          }}
-        />
-        <Tab.Screen
-          name="Bookings"
-          component={CustomerBookingsScreen}
-          options={{
-            tabBarLabel: 'Bookings',
-            tabBarIcon: ({ focused, color }) => (
-              <Ionicons name={focused ? 'receipt' : 'receipt-outline'} size={20} color={color} />
-            ),
-          }}
-        />
-        <Tab.Screen
-          name="Profile"
-          component={ProfileScreen}
-          options={{
-            tabBarLabel: 'Profile',
-            tabBarIcon: ({ focused, color }) => (
-              <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} />
-            ),
-          }}
-        />
-      </Tab.Navigator>
-    </NavigationContainer>
+    <>
+      {isOffline && <OfflineBanner />}
+      {mode === 'driver' && profile?.isDriver ? (
+        <NavigationContainer>
+          <Tab.Navigator screenOptions={TAB_STYLE}>
+            <Tab.Screen name="DriverHome" component={DriverHome}
+              options={{ tabBarLabel: 'Home', tabBarIcon: ({ focused, color }) => <Ionicons name={focused ? 'car' : 'car-outline'} size={20} color={color} /> }} />
+            <Tab.Screen name="DriverEarnings" component={DriverEarnings}
+              options={{ tabBarLabel: 'Earnings', tabBarIcon: ({ focused, color }) => <Ionicons name={focused ? 'wallet' : 'wallet-outline'} size={20} color={color} /> }} />
+            <Tab.Screen name="DriverProfile" component={ProfileScreen}
+              options={{ tabBarLabel: 'Profile', tabBarIcon: ({ focused, color }) => <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} /> }} />
+          </Tab.Navigator>
+        </NavigationContainer>
+      ) : (
+        <NavigationContainer>
+          <Tab.Navigator screenOptions={TAB_STYLE}>
+            <Tab.Screen name="Home" component={CustomerHome}
+              options={{ tabBarLabel: 'Home', tabBarIcon: ({ focused, color }) => <Ionicons name={focused ? 'home' : 'home-outline'} size={20} color={color} /> }} />
+            <Tab.Screen name="Bookings" component={CustomerBookingsScreen}
+              options={{ tabBarLabel: 'Bookings', tabBarIcon: ({ focused, color }) => <Ionicons name={focused ? 'receipt' : 'receipt-outline'} size={20} color={color} /> }} />
+            <Tab.Screen name="Profile" component={ProfileScreen}
+              options={{ tabBarLabel: 'Profile', tabBarIcon: ({ focused, color }) => <Ionicons name={focused ? 'person' : 'person-outline'} size={20} color={color} /> }} />
+          </Tab.Navigator>
+        </NavigationContainer>
+      )}
+    </>
   );
 }
+
+function NoInternetScreen() {
+  return (
+    <View style={os.container}>
+      <View style={os.iconCircle}><Ionicons name="cloud-offline" size={60} color="#DC2626" /></View>
+      <Text style={os.title}>No Internet Connection</Text>
+      <Text style={os.subtitle}>Please check your WiFi or mobile data and try again</Text>
+      <View style={os.tipsBox}>
+        <Text style={os.tipItem}>📶  Turn on WiFi or Mobile Data</Text>
+        <Text style={os.tipItem}>✈️  Turn off Airplane Mode</Text>
+        <Text style={os.tipItem}>🔄  Restart your phone if issue persists</Text>
+      </View>
+      <Text style={os.footer}>Sarthi will reconnect automatically when internet is available</Text>
+    </View>
+  );
+}
+
+function OfflineBanner() {
+  return (
+    <View style={os.banner}>
+      <Ionicons name="cloud-offline" size={14} color="#FFFFFF" />
+      <Text style={os.bannerText}>No internet connection</Text>
+    </View>
+  );
+}
+
+const os = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#FFFFFF', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
+  iconCircle: { width: 120, height: 120, borderRadius: 60, backgroundColor: '#FEF2F2', justifyContent: 'center', alignItems: 'center', marginBottom: 24 },
+  title: { fontSize: 22, fontWeight: '900', color: '#111827', textAlign: 'center', marginBottom: 8 },
+  subtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', lineHeight: 20, marginBottom: 28 },
+  tipsBox: { backgroundColor: '#F9FAFB', borderRadius: 16, paddingHorizontal: 20, paddingVertical: 16, width: '100%', marginBottom: 28 },
+  tipItem: { fontSize: 14, color: '#374151', fontWeight: '600', marginBottom: 10 },
+  footer: { fontSize: 12, color: '#9CA3AF', textAlign: 'center', fontWeight: '500' },
+  banner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#DC2626', paddingVertical: 8, paddingTop: Platform.OS === 'android' ? 36 : 50 },
+  bannerText: { fontSize: 12, fontWeight: '700', color: '#FFFFFF' },
+});

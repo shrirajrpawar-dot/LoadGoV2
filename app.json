@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "LoadGoV2",
-    "slug": "LoadGoV2",
+    "name": "Sarthi",
+    "slug": "Sarthi",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -22,15 +22,31 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.shrirajrpawar.LoadGoV2",
+      "permissions": [
+        "VIBRATE",
+        "RECEIVE_BOOT_COMPLETED"
+      ],
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyDqEdCuxppmgcSK0i9SbEWjw9tnsn9YnCI"
         }
-      }
+      },
+      "useNextNotificationsApi": true
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "color": "#10B981",
+          "defaultChannel": "bookings",
+          "androidMode": "default",
+          "androidCollapsedTitle": "Sarthi"
+        }
+      ]
+    ],
     "extra": {
       "eas": {
         "projectId": "a57d3ed1-d3f4-4ee1-a69b-b3a1a462f275"

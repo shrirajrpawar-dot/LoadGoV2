@@ -15,6 +15,14 @@ export default function ProfileScreen() {
   const { user, profile, driverDoc, joinAsDriver } = useAuth();
   const { settings } = useAppSettings();
   const [activeTab, setActiveTab] = useState('profile'); // 'profile' or 'kyc'
+
+  // Auto-show KYC tab for new drivers who haven't started KYC yet
+  useEffect(() => {
+    const kycStatus = driverDoc?.kyc?.status || 'not_started';
+    if (profile?.isDriver && (kycStatus === 'not_started' || kycStatus === 'rejected')) {
+      setActiveTab('kyc');
+    }
+  }, [profile?.isDriver, driverDoc?.kyc?.status]);
   // Derive isDriver from props synchronously so it never lags behind a re-render.
   // This is what was causing the "View KYC" button to not redirect — the
   // useState version flipped between renders.
@@ -253,24 +261,21 @@ export default function ProfileScreen() {
 
   const handleJoinAsDriver = () => {
     Alert.alert(
-      '⚠️ Switch to Driver Mode',
-      'You will switch to driver mode and won\'t be able to use the customer profile anymore.\n\nYou can only accept deliveries and manage earnings.\n\nAre you sure?',
+      '🚗 Become a Driver',
+      'You\'ll need to complete KYC verification to start accepting bookings.\n\nReady to proceed?',
       [
-        { text: 'Cancel', onPress: () => {}, style: 'cancel' },
+        { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Yes, Join as Driver',
+          text: 'Yes, Continue',
           onPress: async () => {
             try {
               await joinAsDriver();
-              // isDriver will sync automatically from auth context
-              Alert.alert('✅ Welcome!', 'Complete your KYC to start accepting bookings');
-              // Give time for state to update before switching tab
-              setTimeout(() => setActiveTab('kyc'), 500);
+              // KYC tab will auto-show via useEffect
+              Alert.alert('✅ Welcome!', 'Please fill in your KYC details to get started.');
             } catch (e) {
               Alert.alert('Error', e.message);
             }
           },
-          style: 'destructive'
         }
       ]
     );

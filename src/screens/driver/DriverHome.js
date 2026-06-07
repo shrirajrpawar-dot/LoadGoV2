@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   Alert, ActivityIndicator, Switch, ScrollView, TextInput, Linking, Animated, Platform, Dimensions,
-  KeyboardAvoidingView
+  KeyboardAvoidingView, Vibration,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
@@ -11,7 +11,9 @@ import { Ionicons } from '@expo/vector-icons';
 import {
   collection, query, where, onSnapshot, limit,
   doc, updateDoc, getDoc, serverTimestamp, arrayUnion, addDoc,
+  runTransaction, increment,
 } from 'firebase/firestore';
+import { sendLocalNotification } from '../../hooks/useNotifications';
 import { db } from '../../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppSettings } from '../../hooks/useAppSettings';
@@ -42,10 +44,15 @@ export default function DriverHome() {
   const [actionLoading, setActionLoading] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [driverLocation, setDriverLocation] = useState(null); // {lat, lng}
+  const [pendingCommissionPaise, setPendingCommissionPaise] = useState(0);
 
   // KYC status check
   const kycStatus = driverDoc?.kyc?.status || 'not_started';
   const isKycApproved = kycStatus === 'approved' || kycStatus === 'verified';
+  const isBlocked = !!driverDoc?.blocked;
+  const maxOwedRupees = Number(settings.maxOwedCommission) || 500;
+  const pendingCommissionRupees = Math.round(pendingCommissionPaise / 100);
+  const isCommissionBlocked = pendingCommissionRupees > maxOwedRupees;
 
   // Active states the driver still cares about (current trip)
   const ACTIVE_STATES = ['accepted', 'arrived', 'picked_up', 'reached_dropoff', 'awaiting_payment'];
@@ -139,7 +146,36 @@ export default function DriverHome() {
     return () => { unsubDriver(); unsubSearching(); unsubMine(); };
   }, [user?.uid, isOnline, driverDoc?.vehicle?.type]);
 
-  // Live driver location: update Firestore every 30s while online (and not on a trip)
+  // ── Alert driver when NEW booking arrives ──
+  const prevBookingCount = useRef(0);
+  useEffect(() => {
+    if (!isOnline || !currentBooking) {
+      // Only alert for new bookings when online and not on a trip
+      const count = availableBookings.length;
+      if (count > prevBookingCount.current && prevBookingCount.current >= 0) {
+        const newCount = count - prevBookingCount.current;
+        if (newCount > 0 && prevBookingCount.current > 0) {
+          // New booking arrived — vibrate + local notification
+          Vibration.vibrate([0, 400, 200, 400, 200, 400]); // 3 pulses
+
+          const newest = availableBookings[0];
+          const pickup = newest?.pickup?.address || 'Nearby';
+          const drop = newest?.drop?.address || '';
+          const fare = newest?.fare?.totalInPaise ? `₹${Math.round(newest.fare.totalInPaise / 100)}` : '';
+
+          sendLocalNotification(
+            '🚚 New Trip Request!',
+            `${pickup}${drop ? ' → ' + drop : ''} ${fare}`.trim(),
+            { type: 'new_booking', bookingId: newest?.id }
+          );
+        }
+      }
+      prevBookingCount.current = count;
+    }
+  }, [availableBookings.length, isOnline, currentBooking]);
+
+  // Live driver location: update Firestore only when moved 100m+
+  const lastWrittenLocation = useRef(null);
   useEffect(() => {
     if (!user?.uid || !isOnline) return;
 
@@ -153,9 +189,16 @@ export default function DriverHome() {
         if (cancelled) return;
         const coord = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setDriverLocation(coord);
-        await updateDoc(doc(db, 'drivers', user.uid), {
-          location: { ...coord, updatedAt: serverTimestamp() },
-        });
+
+        // Only write to Firestore if moved 100m+ (saves writes at scale)
+        const prev = lastWrittenLocation.current;
+        const moved = prev ? haversineKm(prev.lat, prev.lng, coord.lat, coord.lng) * 1000 : 9999; // meters
+        if (moved > 100 || !prev) {
+          lastWrittenLocation.current = coord;
+          await updateDoc(doc(db, 'drivers', user.uid), {
+            location: { ...coord, updatedAt: serverTimestamp() },
+          });
+        }
       } catch (e) {
         // silently ignore — driver might've revoked permission
       }
@@ -182,13 +225,131 @@ export default function DriverHome() {
     }
   }, [currentBooking?.status, focusedIndex, availableBookings.length]);
 
-  // Logic to prevent going online
+  // Pending commission listener + auto-enforcement + auto-unblock
+  useEffect(() => {
+    if (!user?.uid) return;
+    const q = query(
+      collection(db, 'bookings'),
+      where('driverId', '==', user.uid),
+      where('commission.status', '==', 'pending_from_driver')
+    );
+    const unsub = onSnapshot(q, async (snap) => {
+      const total = snap.docs.reduce((sum, d) => sum + (d.data().commission?.amountInPaise || 0), 0);
+      setPendingCommissionPaise(total);
+      
+      const duesRupees = Math.round(total / 100);
+      const maxRupees = Number(settings.maxOwedCommission) || 500;
+      
+      // Auto-force offline if dues exceed limit while driver is online
+      if (isOnline && duesRupees > maxRupees) {
+        try {
+          await updateDoc(doc(db, 'drivers', user.uid), { status: 'offline' });
+          Alert.alert(
+            '💰 Commission Dues Exceeded',
+            `You owe ₹${duesRupees} (limit: ₹${maxRupees}). You've been automatically set offline. Pay your dues to go back online.`,
+            [{ text: 'Pay Now', onPress: payCommission }]
+          );
+        } catch (e) {
+          console.error('Could not force offline:', e.message);
+        }
+      }
+      
+      // Auto-unblock if dues now < limit and driver was previously blocked
+      if (!isOnline && duesRupees < maxRupees && driverDoc?.commissionPaymentClaimedAt) {
+        try {
+          await updateDoc(doc(db, 'drivers', user.uid), { 
+            commissionPaymentClaimedAt: null, // Clear the payment claim flag
+          });
+          Alert.alert(
+            '✅ Commission Cleared!',
+            `Your dues are now settled. You can go online again!`,
+            [{ text: 'Go Online', onPress: () => setIsOnline(true) }]
+          );
+        } catch (e) {
+          console.error('Could not auto-unblock:', e.message);
+        }
+      }
+    });
+    return () => unsub();
+  }, [user?.uid, isOnline, settings.maxOwedCommission, driverDoc?.commissionPaymentClaimedAt]);
+
+  // Pay commission via UPI to Sarthi
+  const payCommission = async () => {
+    const sarthiUpi = settings.upiId;
+    if (!sarthiUpi) {
+      Alert.alert('Error', 'Company UPI ID not configured. Contact admin.');
+      return;
+    }
+    const amount = pendingCommissionRupees;
+    const note = encodeURIComponent(`Sarthi Commission - ${user.uid.slice(0, 6)}`);
+    const upiUrl = `upi://pay?pa=${sarthiUpi}&pn=Sarthi&am=${amount}&cu=INR&tn=${note}`;
+    try {
+      const supported = await Linking.canOpenURL(upiUrl);
+      if (!supported) {
+        Alert.alert('No UPI App', `Pay manually to ${sarthiUpi}, amount ₹${amount}`);
+        return;
+      }
+      await Linking.openURL(upiUrl);
+      
+      // After UPI app returns, ask if payment was sent
+      setTimeout(() => {
+        Alert.alert(
+          'Payment Confirmation',
+          `Did you complete the payment of ₹${amount}?`,
+          [
+            { text: 'No, not yet', style: 'cancel' },
+            {
+              text: 'Yes, I paid!',
+              onPress: () => {
+                // Add a marker that driver claims payment sent
+                updateDoc(doc(db, 'drivers', user.uid), {
+                  commissionPaymentClaimedAt: new Date().toISOString(),
+                  commissionPaymentAmount: amount,
+                })
+                  .then(() => {
+                    Alert.alert(
+                      '✅ Payment Logged',
+                      `Your payment of ₹${amount} has been recorded. Admin will verify within 1-2 hours and you'll be unblocked automatically.`,
+                      [{ text: 'OK', onPress: () => {} }]
+                    );
+                  })
+                  .catch(e => Alert.alert('Error', e.message));
+              },
+            },
+          ]
+        );
+      }, 1000);
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
   const toggleOnline = async () => {
     if (!isKycApproved) {
       Alert.alert(
         "🔒 KYC Required",
         "Your account is not yet verified. Please complete your KYC and wait for admin approval to start receiving bookings.",
-        [{ text: "View KYC Status", onPress: () => {} }] // Add navigation to Profile if needed
+        [{ text: "View KYC Status", onPress: () => {} }]
+      );
+      return;
+    }
+
+    if (isBlocked) {
+      Alert.alert(
+        "🚫 Account Blocked",
+        "Your account has been blocked by admin. Contact support for details."
+      );
+      return;
+    }
+
+    if (!isOnline && isCommissionBlocked) {
+      Alert.alert(
+        "💰 Commission Due",
+        `You owe ₹${pendingCommissionRupees} in commission (limit ₹${maxOwedRupees}). Please clear your dues to go online.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Pay Now', onPress: payCommission },
+        ]
       );
       return;
     }
@@ -223,15 +384,12 @@ export default function DriverHome() {
     const commissionPct = booking.commission?.pct || 20;
     const earnPaise = Math.round(totalFare * (100 - commissionPct) / 100);
 
+    // Atomic increment — no race condition even with simultaneous completions
     const driverRef = doc(db, 'drivers', user.uid);
-    const driverSnap = await getDoc(driverRef);
-    const cur = driverSnap.data()?.earnings || { todayInPaise: 0, totalInPaise: 0 };
-
     await updateDoc(driverRef, {
-      earnings: {
-        todayInPaise: (cur.todayInPaise || 0) + earnPaise,
-        totalInPaise: (cur.totalInPaise || 0) + earnPaise,
-      },
+      'earnings.todayInPaise': increment(earnPaise),
+      'earnings.totalInPaise': increment(earnPaise),
+      'earnings.lastEarningDate': new Date().toISOString().slice(0, 10), // for midnight reset
     });
 
     Alert.alert("Job Done!", `You earned ₹${Math.round(earnPaise / 100)}`);
@@ -247,12 +405,15 @@ export default function DriverHome() {
       if (type === 'pickup') {
         await updateDoc(doc(db, 'bookings', currentBooking.id), { status: 'picked_up' });
       } else {
-        // Check if UPI payment is pending before completing
+        // Check if payment is pending before completing
         const isUpi = currentBooking.paymentMethod === 'upi_direct' || currentBooking.paymentMethod === 'upi';
-        const isPaid = currentBooking.paymentStatus === 'driver_confirmed';
         const isCod = currentBooking.paymentMethod === 'cod' || !currentBooking.paymentMethod;
+        const isPaid = currentBooking.paymentStatus === 'driver_confirmed';
 
-        if (isUpi && !isPaid) {
+        if (isPaid) {
+          // Already confirmed — complete immediately
+          await completeBooking(currentBooking);
+        } else if (isUpi) {
           // UPI not yet confirmed — park in awaiting_payment
           await updateDoc(doc(db, 'bookings', currentBooking.id), {
             status: 'awaiting_payment',
@@ -262,8 +423,18 @@ export default function DriverHome() {
             "Delivery Verified!",
             "Now confirm you've received the UPI payment to complete this trip."
           );
+        } else if (isCod) {
+          // Cash — park in awaiting_payment, wait for cash collection confirmation
+          await updateDoc(doc(db, 'bookings', currentBooking.id), {
+            status: 'awaiting_payment',
+            deliveryOtpVerifiedAt: serverTimestamp(),
+          });
+          Alert.alert(
+            "Delivery Verified!",
+            "Collect the cash payment from the customer and confirm below."
+          );
         } else {
-          // Cash or already-paid UPI or Razorpay — complete immediately
+          // Razorpay or other — complete immediately
           await completeBooking(currentBooking);
         }
       }
@@ -379,14 +550,15 @@ export default function DriverHome() {
                 <Text style={s.title}>Driver Mode</Text>
                 {!isKycApproved && <Ionicons name="lock-closed" size={16} color="#F59E0B" style={{ marginLeft: 6 }} />}
             </View>
-            <Text style={{ fontSize: 12, color: !isKycApproved ? '#F59E0B' : (isOnline ? 'green' : 'red'), fontWeight: '600' }}>
-              {!isKycApproved ? `KYC ${kycStatus.toUpperCase()} — Tap for help` : (isOnline ? 'ONLINE' : 'OFFLINE')}
+            <Text style={{ fontSize: 12, color: isBlocked ? '#EF4444' : !isKycApproved ? '#F59E0B' : isCommissionBlocked ? '#F59E0B' : (isOnline ? 'green' : 'red'), fontWeight: '600' }}>
+              {isBlocked ? '🚫 BLOCKED' : !isKycApproved ? `KYC ${kycStatus.toUpperCase()} — Tap for help` : isCommissionBlocked ? '💰 DUES PENDING' : (isOnline ? 'ONLINE' : 'OFFLINE')}
             </Text>
           </TouchableOpacity>
           <Switch 
             value={isOnline} 
             onValueChange={toggleOnline}
-            trackColor={{ false: "#D1D5DB", true: "#10B981" }}
+            disabled={isBlocked}
+            trackColor={{ false: "#D1D5DB", true: isBlocked ? '#FECACA' : "#10B981" }}
           />
         </View>
       </SafeAreaView>
@@ -444,7 +616,8 @@ export default function DriverHome() {
                         paymentStatus: 'driver_confirmed',
                         paymentConfirmedAt: serverTimestamp(),
                       });
-                      Alert.alert('✓ Payment Confirmed', 'Marked as received.');
+                      // Complete booking after payment confirmed
+                      await completeBooking(currentBooking);
                     } catch (e) {
                       Alert.alert('Error', e.message);
                     }
@@ -462,6 +635,55 @@ export default function DriverHome() {
                 <Text style={s.paymentBannerSub}>
                   ℹ️ This is a UPI booking. Customer will pay you directly when ready.
                 </Text>
+              </View>
+            )}
+
+            {/* Cash payment confirmation banner */}
+            {(currentBooking.paymentMethod === 'cod' || !currentBooking.paymentMethod) &&
+             currentBooking.status === 'awaiting_payment' &&
+             currentBooking.paymentStatus !== 'driver_confirmed' && (
+              <View style={s.paymentBanner}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.paymentBannerTitle}>💵 Collect Cash Payment</Text>
+                  <Text style={s.paymentBannerSub}>
+                    Collect ₹{Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} cash from {currentBooking.customerName || 'customer'}
+                  </Text>
+                  {currentBooking.paymentStatus === 'customer_paid' && (
+                    <Text style={{ fontSize: 11, color: '#059669', fontWeight: '700', marginTop: 4 }}>
+                      ✓ Customer confirmed they paid
+                    </Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={[s.paymentConfirmBtn, { backgroundColor: '#059669' }]}
+                  onPress={() => {
+                    Alert.alert(
+                      'Confirm Cash Received',
+                      `Did you receive ₹${Math.round((currentBooking.fare?.totalInPaise || 0) / 100)} cash from the customer?`,
+                      [
+                        { text: 'No', style: 'cancel' },
+                        {
+                          text: 'Yes, Received',
+                          onPress: async () => {
+                            try {
+                              await updateDoc(doc(db, 'bookings', currentBooking.id), {
+                                paymentStatus: 'driver_confirmed',
+                                paymentConfirmedAt: serverTimestamp(),
+                                cashCollectedByDriver: true,
+                              });
+                              // Now complete the booking
+                              await completeBooking(currentBooking);
+                            } catch (e) {
+                              Alert.alert('Error', e.message);
+                            }
+                          },
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Text style={s.paymentConfirmBtnTxt}>Cash Received</Text>
+                </TouchableOpacity>
               </View>
             )}
 
@@ -613,17 +835,31 @@ export default function DriverHome() {
                         </TouchableOpacity>
                         <TouchableOpacity 
                           style={s.acceptBtn}
-                          onPress={() => updateDoc(doc(db, 'bookings', item.id), {
-                            status: 'accepted',
-                            driverId: user.uid,
-                            driverName: driverDoc?.kyc?.fullName || profile?.name || 'Driver',
-                            driverPhone: profile?.phone || '',
-                            driverUpiId: driverDoc?.kyc?.upiId || '',
-                            driverVehicleLabel: driverDoc?.vehicle?.label || '',
-                            driverVehicleNumber: driverDoc?.vehicle?.number || '',
-                            driverVehicleModel: driverDoc?.vehicle?.model || '',
-                            acceptedAt: serverTimestamp(),
-                          })}
+                          onPress={async () => {
+                            try {
+                              const bookingRef = doc(db, 'bookings', item.id);
+                              await runTransaction(db, async (tx) => {
+                                const snap = await tx.get(bookingRef);
+                                if (!snap.exists()) throw new Error('Booking no longer exists');
+                                const data = snap.data();
+                                if (data.status !== 'searching') throw new Error('Already taken by another driver');
+                                if (data.driverId) throw new Error('Already accepted');
+                                tx.update(bookingRef, {
+                                  status: 'accepted',
+                                  driverId: user.uid,
+                                  driverName: driverDoc?.kyc?.fullName || profile?.name || 'Driver',
+                                  driverPhone: profile?.phone || '',
+                                  driverUpiId: driverDoc?.kyc?.upiId || '',
+                                  driverVehicleLabel: driverDoc?.vehicle?.label || '',
+                                  driverVehicleNumber: driverDoc?.vehicle?.number || '',
+                                  driverVehicleModel: driverDoc?.vehicle?.model || '',
+                                  acceptedAt: serverTimestamp(),
+                                });
+                              });
+                            } catch (e) {
+                              Alert.alert('Could not accept', e.message || 'This booking may have been taken.');
+                            }
+                          }}
                         >
                           <Ionicons name="checkmark" size={18} color="#FFF" />
                           <Text style={s.acceptBtnText}>Accept</Text>
@@ -651,11 +887,62 @@ export default function DriverHome() {
             </View>
           ) : (
             <View style={s.panel}>
-                <Text style={s.centerTxt}>
+                {isBlocked ? (
+                  <View style={s.blockedBanner}>
+                    <Text style={s.blockedTitle}>🚫 Account Blocked</Text>
+                    <Text style={s.blockedSub}>Your account has been blocked by admin. Contact support for details.</Text>
+                  </View>
+                ) : isCommissionBlocked ? (
+                  driverDoc?.commissionPaymentClaimedAt ? (
+                    <View style={s.paymentVerifyingBanner}>
+                      <Ionicons name="hourglass" size={20} color="#D97706" />
+                      <View style={{ flex: 1, marginLeft: 12 }}>
+                        <Text style={s.paymentVerifyingTitle}>⏳ Payment Verification In Progress</Text>
+                        <Text style={s.paymentVerifyingText}>
+                          Admin is verifying your ₹{pendingCommissionRupees} payment. This usually takes 15-30 minutes.
+                        </Text>
+                        <Text style={s.paymentVerifyingHint}>
+                          You'll be automatically unblocked once verified.
+                        </Text>
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={s.commissionBanner}>
+                      <Text style={s.commissionTitle}>💰 Commission Due — ₹{pendingCommissionRupees}</Text>
+                      <Text style={s.commissionSub}>You owe more than the ₹{maxOwedRupees} limit. Pay your dues to go online.</Text>
+                      <TouchableOpacity style={s.payCommissionBtn} onPress={payCommission}>
+                        <Text style={s.payCommissionBtnTxt}>Pay ₹{pendingCommissionRupees} via UPI</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )
+                ) : (
+                  <Text style={s.centerTxt}>
                     {!isKycApproved 
                         ? "Complete KYC to see requests" 
                         : (isOnline ? "Searching for requests nearby..." : "You are currently Offline")}
-                </Text>
+                  </Text>
+                )}
+
+                {/* Show pending commission reminder even if not blocked */}
+                {pendingCommissionRupees > 0 && !currentBooking && (
+                  <TouchableOpacity 
+                    style={[
+                      s.commissionReminder,
+                      pendingCommissionRupees > (maxOwedRupees * 0.8) && { backgroundColor: '#FEF2F2', borderColor: '#FECACA' }
+                    ]}
+                    onPress={payCommission}
+                  >
+                    <Text style={[
+                      s.commissionReminderTxt,
+                      pendingCommissionRupees > (maxOwedRupees * 0.8) && { color: '#991B1B' }
+                    ]}>
+                      {pendingCommissionRupees > (maxOwedRupees * 0.8) 
+                        ? `⚠️ URGENT: You owe ₹${pendingCommissionRupees} (limit ₹${maxOwedRupees}) — Pay now!`
+                        : `💰 You owe ₹${pendingCommissionRupees} commission — Tap to pay`
+                      }
+                    </Text>
+                  </TouchableOpacity>
+                )}
             </View>
           )
         )}
@@ -689,6 +976,29 @@ const s = StyleSheet.create({
   awaitingPaymentTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
   awaitingPaymentSub: { fontSize: 14, fontWeight: '700', color: '#78350F', marginBottom: 6 },
   awaitingPaymentHint: { fontSize: 12, fontWeight: '500', color: '#92400E' },
+  blockedBanner: { backgroundColor: '#FEF2F2', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FECACA', alignItems: 'center' },
+  blockedTitle: { fontSize: 16, fontWeight: '900', color: '#991B1B', marginBottom: 4 },
+  blockedSub: { fontSize: 13, fontWeight: '500', color: '#B91C1C', textAlign: 'center' },
+  commissionBanner: { backgroundColor: '#FEF3C7', borderRadius: 14, padding: 16, borderWidth: 1.5, borderColor: '#FDE68A', alignItems: 'center' },
+  paymentVerifyingBanner: { 
+    backgroundColor: '#FEF3C7', 
+    borderRadius: 14, 
+    padding: 16, 
+    borderWidth: 1.5, 
+    borderColor: '#FDE68A', 
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  paymentVerifyingTitle: { fontSize: 14, fontWeight: '800', color: '#92400E', marginBottom: 4 },
+  paymentVerifyingText: { fontSize: 12, color: '#78350F', lineHeight: 16, marginBottom: 4 },
+  paymentVerifyingHint: { fontSize: 11, color: '#92400E', fontStyle: 'italic' },
+  commissionTitle: { fontSize: 16, fontWeight: '900', color: '#92400E', marginBottom: 4 },
+  commissionSub: { fontSize: 12, fontWeight: '500', color: '#78350F', textAlign: 'center', marginBottom: 12 },
+  payCommissionBtn: { backgroundColor: '#10B981', borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12 },
+  payCommissionBtnTxt: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
+  commissionReminder: { backgroundColor: '#FEF3C7', borderRadius: 10, padding: 10, marginTop: 12, borderWidth: 1, borderColor: '#FDE68A' },
+  commissionReminderTxt: { fontSize: 12, fontWeight: '700', color: '#92400E', textAlign: 'center' },
   navBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#3B82F6', paddingVertical: 13, borderRadius: 12, marginTop: 10 },
   navBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14, letterSpacing: 0.2 },
   input: { borderBottomWidth: 2, borderColor: '#eee', padding: 10, textAlign: 'center', fontSize: 24, fontWeight: 'bold', marginBottom: 10 },

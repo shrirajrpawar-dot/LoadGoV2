@@ -1,4 +1,5 @@
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
+const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 
@@ -111,18 +112,6 @@ exports.quoteFare = onCall({ region: 'asia-south1' }, async (request) => {
 
 // ============================================================
 // RAZORPAY FUNCTIONS
-// ============================================================
-//
-// SETUP (one-time):
-//   1. Sign up at razorpay.com, complete KYC, get key_id and key_secret
-//   2. cd functions && npm install razorpay
-//   3. firebase functions:secrets:set RAZORPAY_KEY_ID
-//      firebase functions:secrets:set RAZORPAY_KEY_SECRET
-//      firebase functions:secrets:set RAZORPAY_WEBHOOK_SECRET
-//   4. firebase deploy --only functions
-//   5. In Razorpay dashboard, set webhook URL to:
-//      https://asia-south1-loadgo-dev.cloudfunctions.net/razorpayWebhook
-//      with event: "payment.captured"
 // ============================================================
 
 // 1. CREATE ORDER
@@ -245,3 +234,187 @@ exports.razorpayWebhook = onRequest({ region: 'asia-south1' }, async (req, res) 
 
   res.status(200).send('OK');
 });
+
+// ============================================================
+// PUSH NOTIFICATIONS
+// ============================================================
+// Setup: cd functions && npm install expo-server-sdk
+// ============================================================
+
+const { Expo } = require('expo-server-sdk');
+const expo = new Expo();
+
+/**
+ * Notify online drivers when a new booking is created
+ */
+exports.notifyDriversOnNewBooking = onDocumentCreated(
+  { document: 'bookings/{bookingId}', region: 'asia-south1' },
+  async (event) => {
+    const booking = event.data.data();
+    const bookingId = event.params.bookingId;
+
+    if (booking.status !== 'searching') return;
+
+    const vehicleType = booking.vehicleType;
+    const pickupAddr = booking.pickup?.address || 'Nearby';
+    const dropAddr = booking.drop?.address || '';
+    const fare = booking.fare?.totalInPaise
+      ? `₹${Math.round(booking.fare.totalInPaise / 100)}`
+      : '';
+
+    console.log(`[Notify] New booking ${bookingId} for ${vehicleType}`);
+
+    const driversSnap = await admin.firestore()
+      .collection('drivers')
+      .where('status', '==', 'online')
+      .where('vehicle.type', '==', vehicleType)
+      .get();
+
+    if (driversSnap.empty) {
+      console.log(`[Notify] No online drivers for ${vehicleType}`);
+      return;
+    }
+
+    const messages = [];
+    driversSnap.forEach((driverDoc) => {
+      const driver = driverDoc.data();
+      const token = driver.expoPushToken;
+      if (token && Expo.isExpoPushToken(token)) {
+        messages.push({
+          to: token,
+          sound: 'default',
+          title: '🚚 New Trip Request!',
+          body: `${pickupAddr}${dropAddr ? ' → ' + dropAddr : ''} ${fare}`.trim(),
+          data: { type: 'new_booking', bookingId, vehicleType },
+          channelId: 'bookings',
+          priority: 'high',
+          badge: 1,
+        });
+      }
+    });
+
+    if (messages.length === 0) return;
+
+    console.log(`[Notify] Sending to ${messages.length} drivers`);
+    const chunks = expo.chunkPushNotifications(messages);
+    for (const chunk of chunks) {
+      try { await expo.sendPushNotificationsAsync(chunk); }
+      catch (err) { console.error('[Notify] Send error:', err); }
+    }
+  }
+);
+
+/**
+ * Notify customer when booking status changes
+ */
+exports.notifyCustomerOnBookingUpdate = onDocumentUpdated(
+  { document: 'bookings/{bookingId}', region: 'asia-south1' },
+  async (event) => {
+    const before = event.data.before.data();
+    const after = event.data.after.data();
+    const bookingId = event.params.bookingId;
+
+    if (before.status === after.status) return;
+
+    const customerId = after.customerId;
+    if (!customerId) return;
+
+    const customerDoc = await admin.firestore().collection('users').doc(customerId).get();
+    if (!customerDoc.exists) return;
+
+    const token = customerDoc.data().expoPushToken;
+    if (!token || !Expo.isExpoPushToken(token)) return;
+
+    let title, body;
+    switch (after.status) {
+      case 'accepted':
+        title = '✅ Driver Found!';
+        body = `${after.driverName || 'Your driver'} is on the way to pick up`;
+        break;
+      case 'arrived':
+        title = '📍 Driver Arrived!';
+        body = `${after.driverName || 'Your driver'} has arrived at pickup point`;
+        break;
+      case 'picked_up':
+        title = '🚚 On The Way!';
+        body = 'Your delivery is in progress';
+        break;
+      case 'reached_dropoff':
+      case 'reached':
+        title = '📦 Almost There!';
+        body = 'Driver has reached the drop location';
+        break;
+      case 'awaiting_payment':
+        title = '💳 Payment Required';
+        body = `Please confirm your payment of ₹${Math.round((after.fare?.totalInPaise || 0) / 100)}`;
+        break;
+      case 'completed':
+        title = '✅ Trip Complete!';
+        body = `Your trip is complete. Total: ₹${Math.round((after.fare?.totalInPaise || 0) / 100)}`;
+        break;
+      case 'cancelled':
+        title = '❌ Booking Cancelled';
+        body = after.cancelReason || 'Your booking has been cancelled';
+        break;
+      default:
+        return;
+    }
+
+    try {
+      await expo.sendPushNotificationsAsync([{
+        to: token,
+        sound: 'default',
+        title,
+        body,
+        data: { type: 'booking_update', bookingId, status: after.status },
+        channelId: 'general',
+        priority: 'high',
+      }]);
+      console.log(`[Notify] Customer notified: ${after.status}`);
+    } catch (e) {
+      console.error('[Notify] Customer notification error:', e);
+    }
+  }
+);
+
+/**
+ * SOS Alert handler — notify driver if booking exists
+ */
+exports.handleSOS = onDocumentCreated(
+  { document: 'sos/{sosId}', region: 'asia-south1' },
+  async (event) => {
+    const sos = event.data.data();
+    const sosId = event.params.sosId;
+
+    console.log(`[SOS] Alert from ${sos.customerName}: type=${sos.type}`);
+
+    if (sos.bookingId) {
+      try {
+        const bookingSnap = await admin.firestore().doc(`bookings/${sos.bookingId}`).get();
+        if (bookingSnap.exists) {
+          const booking = bookingSnap.data();
+          if (booking.driverId) {
+            const driverSnap = await admin.firestore().doc(`drivers/${booking.driverId}`).get();
+            if (driverSnap.exists) {
+              const token = driverSnap.data().expoPushToken;
+              if (token && Expo.isExpoPushToken(token)) {
+                await expo.sendPushNotificationsAsync([{
+                  to: token,
+                  sound: 'default',
+                  title: '🚨 EMERGENCY ALERT',
+                  body: `Customer ${sos.customerName} needs help!`,
+                  data: { type: 'sos', sosId, bookingId: sos.bookingId },
+                  channelId: 'bookings',
+                  priority: 'high',
+                }]);
+                console.log('[SOS] Driver notified');
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[SOS] Notification error:', e);
+      }
+    }
+  }
+);

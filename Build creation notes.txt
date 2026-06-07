@@ -1,0 +1,26 @@
+WINDOWS POWERSHELL - CORRECT COMMANDS
+Run these in PowerShell (in LoadGoV2 folder):
+Step 1: Delete android folder
+powershellRemove-Item -Path android -Recurse -Force
+Step 2: Prebuild Expo
+powershellnpx expo prebuild --clean
+Step 3: Build APK
+powershellcd android
+./gradlew clean assembleRelease --no-daemon
+
+🎯 ONE BY ONE
+powershell# First
+Remove-Item -Path android -Recurse -Force
+
+# Wait for it to complete, then
+npx expo prebuild --clean
+
+# Wait for it to complete, then
+cd android
+
+# Then
+./gradlew clean assembleRelease --no-daemon
+
+✅ RESULT
+✅ App name: Sarthi (not LoadGoV2)
+✅ APK generated in: android/app/build/outputs/apk/release/
